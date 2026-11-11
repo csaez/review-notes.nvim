@@ -33,14 +33,6 @@ function M.check()
     health.info("no `submit` command: notes are sent one by one and the summary stays in the notes")
   end
 
-  if cmds.threads and cmds.threads[1] == "git-lab" then
-    if (vim.env.GITLAB_TOKEN or "") ~= "" then
-      health.ok("GITLAB_TOKEN is set")
-    else
-      health.error("GITLAB_TOKEN is not set (needed by git-lab)")
-    end
-  end
-
   local notes = review.notes_file()
   if not notes then
     health.info("not in a git repository: no notes file to check")

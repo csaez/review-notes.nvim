@@ -13,8 +13,8 @@ you configure. The default backend is `git-lab` (dotfiles `bin/git-lab`).
 - Backend contract: see `M.config` in `lua/review_notes/init.lua`.
 
 Tests: `make test` (needs plenary.nvim in lazy's data directory; set `PLENARY`
-to use another location). `:checkhealth review_notes` checks the backend
-commands, the token and the notes file.
+to use another location). `:checkhealth review_notes` checks that the backend
+commands are executable and that the notes file is readable.
 
 ## Picker
 
