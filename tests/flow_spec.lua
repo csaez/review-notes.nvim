@@ -155,3 +155,60 @@ describe("pull and push", function()
     assert.are.same({}, read(log))
   end)
 end)
+
+describe("picker", function()
+  local repo, restore
+
+  before_each(function()
+    -- A buffer left over from another spec would point at a deleted repo.
+    vim.cmd("silent! %bwipeout!")
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+    vim.fn.writefile({ "one", "two" }, repo .. "/a.c")
+    vim.cmd("cd " .. repo)
+    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
+    vim.fn.mkdir(dir, "p")
+    vim.fn.writefile({ "a.c:2: [draft] second line", "a.c:1: [resolved] first" }, dir .. "/main.txt")
+    local select, picker = vim.ui.select, review.config.picker
+    restore = function()
+      vim.ui.select, review.config.picker = select, picker
+    end
+  end)
+
+  after_each(function()
+    restore()
+    vim.fn.delete(repo, "rf")
+  end)
+
+  it("lists notes as items, sorted by position, searchable by state", function()
+    local items = review.items()
+    assert.are.equal(2, #items)
+    assert.are.equal(1, items[1].line)
+    assert.is_truthy(items[1].text:find("resolved", 1, true))
+    assert.is_truthy(items[2].text:find("draft", 1, true))
+    assert.are.equal("second line", items[2].summary)
+  end)
+
+  it("hands the items to a configured picker, which can open one", function()
+    local got
+    review.config.picker = function(items, open)
+      got = items
+      open(items[2])
+    end
+    review.pick()
+    assert.are.equal(2, #got)
+    assert.are.equal(2, vim.fn.line("."))
+  end)
+
+  it("falls back to vim.ui.select", function()
+    review.config.picker = nil
+    local shown
+    vim.ui.select = function(items, opts, on_choice)
+      shown = opts.format_item(items[1])
+      on_choice(nil)
+    end
+    review.pick()
+    assert.is_truthy(shown:find("a.c:1 first", 1, true))
+  end)
+end)

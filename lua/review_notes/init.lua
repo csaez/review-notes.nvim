@@ -14,6 +14,8 @@ local backend = require("review_notes.backend")
 local M = {}
 
 ---@class review_notes.Config
+---@field picker fun(items: review_notes.Item[], open: fun(item: review_notes.Item))? Replaces
+---  the `vim.ui.select` list of `M.pick`; call `open(item)` to jump to a note.
 ---@field backend table<string, string[]> Command lines, run in the repo root.
 ---  `{path}`, `{line}` and `{thread}` are substituted; text goes on stdin.
 ---    threads    prints [{id, path, line, resolved, comments = [{author, body}]}]
@@ -550,17 +552,25 @@ local function goto_note(n)
   show_cursor_notes()
 end
 
---- Picker over all notes of the review, across files, resolved ones included.
---- Filter with "new", "draft", "thread", "note", "open" or "resolved" (part
---- of the searchable text). The picker's own actions apply,
---- e.g. <c-q> sends the (filtered) list to quickfix.
-function M.pick()
+---@class review_notes.Item
+---@field text string searchable text: kind, state, path and the note ("new", "draft", "resolved", ...)
+---@field file string absolute path
+---@field line integer first line, 1-based
+---@field end_line integer last line, where the icon is
+---@field icon string
+---@field hl string highlight of the icon
+---@field summary string first line of the note
+---@field summary_hl string
+---@field note table the note, for `M.goto_item`
+
+--- All notes of the review as picker items, across files, resolved included.
+---@return review_notes.Item[]
+function M.items()
   local ctx = context()
-  if not ctx then return end
+  if not ctx then return {} end
   local items = {}
   for _, n in ipairs(all_notes(ctx)) do
     local icon, hl = look(n.e)
-    local first = n.e.text:match("^[^\n]*")
     table.insert(items, {
       text = table.concat({
         n.e.kind,
@@ -571,33 +581,39 @@ function M.pick()
         n.e.text,
       }, " "),
       file = n.file,
-      pos = { n.line, 0 },
-      end_pos = { n.end_line, 0 },
-      note = n,
+      line = n.line,
+      end_line = n.end_line,
       icon = icon,
       hl = hl,
-      summary = first,
+      summary = n.e.text:match("^[^\n]*"),
       summary_hl = n.e.resolved and "ReviewResolved" or "ReviewText",
+      note = n,
     })
   end
+  return items
+end
+
+--- Open an item from `M.items()` at its icon line and show its text.
+---@param item review_notes.Item
+function M.goto_item(item) goto_note(item.note) end
+
+--- Pick a note of the review. Uses `config.picker(items, goto_item)` when set,
+--- else `vim.ui.select`.
+function M.pick()
+  local items = M.items()
   if #items == 0 then
     vim.notify("review: no notes for this branch", vim.log.levels.INFO)
     return
   end
-  Snacks.picker({
-    title = "Review notes",
-    items = items,
-    format = function(item, picker)
-      local ret = { { item.icon .. " ", item.hl } }
-      vim.list_extend(ret, Snacks.picker.format.filename(item, picker))
-      table.insert(ret, { item.summary, item.summary_hl })
-      return ret
+  if M.config.picker then return M.config.picker(items, M.goto_item) end
+  vim.ui.select(items, {
+    prompt = "Review notes",
+    format_item = function(item)
+      return ("%s %s:%d %s"):format(item.icon, vim.fn.fnamemodify(item.file, ":~:."), item.line, item.summary)
     end,
-    confirm = function(picker, item)
-      picker:close()
-      if item then goto_note(item.note) end
-    end,
-  })
+  }, function(item)
+    if item then M.goto_item(item) end
+  end)
 end
 
 local function notify(msg, level)

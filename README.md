@@ -13,3 +13,10 @@ you configure. The default backend is `git-lab` (dotfiles `bin/git-lab`).
 
 Tests: `nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedDirectory tests {minimal_init='tests/minimal_init.lua'}"`
 (needs plenary.nvim in lazy's data directory).
+
+## Picker
+
+`:lua require("review_notes").pick()` lists the notes with `vim.ui.select`. To
+use another picker, set `picker = function(items, open) ... end` in `setup()`:
+`items` carry `file`, `line`, `end_line`, `icon`, `hl`, `summary` and a
+searchable `text` (kind, state, path, note); call `open(item)` to jump to one.
