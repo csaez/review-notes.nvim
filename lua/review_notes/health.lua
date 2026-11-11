@@ -32,15 +32,6 @@ function M.check()
   if not cmds.submit then
     health.info("no `submit` command: notes are sent one by one and the summary stays in the notes")
   end
-
-  local notes = review.notes_file()
-  if not notes then
-    health.info("not in a git repository: no notes file to check")
-  elseif vim.fn.filereadable(notes) == 1 then
-    health.ok(("notes file: %s (%d entries)"):format(notes, #require("review_notes.notes").parse(vim.fn.readfile(notes))))
-  else
-    health.info(("notes file: %s (does not exist yet)"):format(notes))
-  end
 end
 
 return M
