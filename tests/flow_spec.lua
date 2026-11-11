@@ -170,10 +170,7 @@ describe("picker", function()
     local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
     vim.fn.mkdir(dir, "p")
     vim.fn.writefile({ "a.c:2: [draft] second line", "a.c:1: [resolved] first" }, dir .. "/main.txt")
-    local select, picker = vim.ui.select, review.config.picker
-    restore = function()
-      vim.ui.select, review.config.picker = select, picker
-    end
+    restore = function() end
   end)
 
   after_each(function()
@@ -190,25 +187,8 @@ describe("picker", function()
     assert.are.equal("second line", items[2].summary)
   end)
 
-  it("hands the items to a configured picker, which can open one", function()
-    local got
-    review.config.picker = function(items, open)
-      got = items
-      open(items[2])
-    end
-    review.pick()
-    assert.are.equal(2, #got)
+  it("opens an item at its icon line", function()
+    review.goto_item(review.items()[2])
     assert.are.equal(2, vim.fn.line("."))
-  end)
-
-  it("falls back to vim.ui.select", function()
-    review.config.picker = nil
-    local shown
-    vim.ui.select = function(items, opts, on_choice)
-      shown = opts.format_item(items[1])
-      on_choice(nil)
-    end
-    review.pick()
-    assert.is_truthy(shown:find("a.c:1 first", 1, true))
   end)
 end)

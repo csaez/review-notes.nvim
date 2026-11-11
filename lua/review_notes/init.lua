@@ -14,8 +14,6 @@ local backend = require("review_notes.backend")
 local M = {}
 
 ---@class review_notes.Config
----@field picker fun(items: review_notes.Item[], open: fun(item: review_notes.Item))? Replaces
----  the `vim.ui.select` list of `M.pick`; call `open(item)` to jump to a note.
 ---@field backend table<string, string[]> Command lines, run in the repo root.
 ---  `{path}`, `{line}` and `{thread}` are substituted; text goes on stdin.
 ---    threads    prints [{id, path, line, resolved, comments = [{author, body}]}]
@@ -596,25 +594,6 @@ end
 --- Open an item from `M.items()` at its icon line and show its text.
 ---@param item review_notes.Item
 function M.goto_item(item) goto_note(item.note) end
-
---- Pick a note of the review. Uses `config.picker(items, goto_item)` when set,
---- else `vim.ui.select`.
-function M.pick()
-  local items = M.items()
-  if #items == 0 then
-    vim.notify("review: no notes for this branch", vim.log.levels.INFO)
-    return
-  end
-  if M.config.picker then return M.config.picker(items, M.goto_item) end
-  vim.ui.select(items, {
-    prompt = "Review notes",
-    format_item = function(item)
-      return ("%s %s:%d %s"):format(item.icon, vim.fn.fnamemodify(item.file, ":~:."), item.line, item.summary)
-    end,
-  }, function(item)
-    if item then M.goto_item(item) end
-  end)
-end
 
 local function notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = "review" })

@@ -16,7 +16,8 @@ Tests: `nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedDirectory tes
 
 ## Picker
 
-`:lua require("review_notes").pick()` lists the notes with `vim.ui.select`. To
-use another picker, set `picker = function(items, open) ... end` in `setup()`:
-`items` carry `file`, `line`, `end_line`, `icon`, `hl`, `summary` and a
-searchable `text` (kind, state, path, note); call `open(item)` to jump to one.
+The plugin has no picker of its own. `require("review_notes").items()` returns
+the notes of the review, ready for any picker: each item has `file`, `line`,
+`end_line`, `icon`, `hl`, `summary`, `summary_hl` and a searchable `text`
+(kind, state, path, note). Call `require("review_notes").goto_item(item)` to
+jump to one.
