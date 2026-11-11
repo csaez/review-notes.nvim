@@ -498,6 +498,13 @@ function M.toggle_pending()
   )
 end
 
+--- Path of the notes file for the current buffer's repository, or nil.
+---@return string?
+function M.notes_file()
+  local ctx = context()
+  return ctx and ctx.path
+end
+
 --- Open the notes file in a split (for editing, reordering, the summary).
 function M.open()
   local ctx = context()
