@@ -192,3 +192,45 @@ describe("picker", function()
     assert.are.equal(2, vim.fn.line("."))
   end)
 end)
+
+describe("status", function()
+  local repo
+
+  before_each(function()
+    vim.cmd("silent! %bwipeout!")
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+    vim.fn.writefile({ "one", "two" }, repo .. "/a.c")
+    vim.cmd("cd " .. repo)
+    vim.cmd("edit a.c")
+  end)
+
+  after_each(function() vim.fn.delete(repo, "rf") end)
+
+  local function write_notes(lines)
+    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
+    vim.fn.mkdir(dir, "p")
+    vim.fn.writefile(lines, dir .. "/main.txt")
+  end
+
+  it("counts what a push would send, and not drafts", function()
+    write_notes({
+      "a.c:1: a new note",
+      "a.c:2: [draft] held back",
+      "a.c:1: [id:t1] @al: why?",
+      "  my reply",
+      "a.c:2: [resolved] [id:t2] @al: done",
+    })
+    review.refresh()
+    local status = review.status()
+    -- a new thread, a reply and a resolve
+    assert.is_truthy(status:find(review.style.send.icon .. " 3", 1, true))
+  end)
+
+  it("shows nothing to send when everything is in sync", function()
+    write_notes({ "a.c:1: [id:t1] @al: why?", "  > @bo: +1" })
+    review.refresh()
+    assert.is_nil(review.status():find(review.style.send.icon, 1, true))
+  end)
+end)

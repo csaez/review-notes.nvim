@@ -213,12 +213,6 @@ describe("apply_sent", function()
 end)
 
 describe("edits", function()
-  it("clears every new tag", function()
-    local out, n = notes.clear_new({ "a.c:1: [id:a] [new] x", "  > y", "a.c:2: [new] z" })
-    assert.are.same({ "a.c:1: [id:a] x", "  > y", "a.c:2: z" }, out)
-    assert.are.equal(2, n)
-  end)
-
   it("edits one entry head", function()
     local out = notes.edit_entry({ "a.c:1: [new] x", "a.c:2: y" }, 1, function(e)
       e.new, e.resolved = false, true

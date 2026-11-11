@@ -17,7 +17,8 @@
 -- Tags after the location, in this order: [resolved] [draft] [id:X] [new].
 --   [draft]  never sent; removing it approves the entry (notes and replies).
 --   [id:X]   the remote thread id; entries without one are new threads.
---   [new]    set by pull when a thread is new or its comments changed.
+--   [new]    set by pull when a thread is new or its comments changed; stays
+--            until I reply to the thread or resolve it.
 -- Quoted (`> `) lines are a cache of the remote thread, rewritten on pull
 -- (remote wins). Other indented lines are mine and pull never touches them.
 -- Lines starting with `#` are ignored. Absolute paths are notes on files
@@ -201,21 +202,6 @@ function M.edit_entry(lines, idx, fn)
     end
   end
   return out
-end
-
---- Drop every [new] tag.
----@return string[] lines
----@return integer count
-function M.clear_new(lines)
-  local out, n = vim.deepcopy(lines), 0
-  for _, e in ipairs(M.parse(lines)) do
-    if e.new then
-      e.new = false
-      out[e.src] = M.head_line(e)
-      n = n + 1
-    end
-  end
-  return out, n
 end
 
 --- Head text and quoted cache of a remote thread: the first comment is the

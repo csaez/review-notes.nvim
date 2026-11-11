@@ -38,14 +38,26 @@ local ns = vim.api.nvim_create_namespace("review_notes")
 local ns_cursor = vim.api.nvim_create_namespace("review_notes_cursor")
 local ns_signs = vim.api.nvim_create_namespace("review_notes_signs")
 
--- Nerd Font icons: comment, comment-discussion, pencil (draft), bell (new).
+-- Nerd Font icons: comment, comment-discussion, pencil (draft), bell (new),
+-- upload (things a push would send).
 ---@type table<string, { icon: string, hl: string }>
 M.style = {
   note = { icon = "\u{ea6b}", hl = "ReviewNote" },
   thread = { icon = "\u{eac7}", hl = "ReviewThread" },
   draft = { icon = "\u{ea73}", hl = "ReviewDraft" },
   new = { icon = "\u{f0f3}", hl = "ReviewNew" },
+  send = { icon = "\u{f093}", hl = "ReviewSend" },
 }
+
+-- What a push would send, per repo root, and the root of each file buffer, for
+-- the statusline (which must not run git on every redraw).
+local to_send = {} ---@type table<string, integer>
+local roots = {} ---@type table<integer, string>
+
+local function count_to_send(lines)
+  local plan = nf.plan(lines)
+  return #plan.new + #plan.replies + #plan.states + (plan.summary ~= "" and 1 or 0)
+end
 
 -- Entries shown per buffer, each with the id of the extmark that tracks it.
 ---@type table<integer, review_notes.Entry[]>
@@ -69,6 +81,7 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "ReviewRange", { default = true, link = "CursorLine" })
   vim.api.nvim_set_hl(0, "ReviewResolved", { default = true, link = "NonText" })
   vim.api.nvim_set_hl(0, "ReviewNew", { default = true, link = "DiagnosticWarn" })
+  vim.api.nvim_set_hl(0, "ReviewSend", { default = true, link = "DiagnosticInfo" })
 end
 
 local function git(args, cwd)
@@ -191,6 +204,7 @@ local function refresh_buffer(buf, entries, root)
   if not vim.api.nvim_buf_is_loaded(buf) or vim.bo[buf].buftype ~= "" then return end
   local name = vim.api.nvim_buf_get_name(buf)
   if name == "" then return end
+  roots[buf] = root
   local rel = note_path(name, root)
   -- Unsaved edits: the file's line numbers are stale, keep where the notes
   -- have moved to (matched by their location in the file).
@@ -327,7 +341,8 @@ function M.jump(dir)
   show_cursor_notes()
 end
 
---- Statusline component for the current buffer: open entries per state.
+--- Statusline component for the current buffer: open entries per state, then
+--- the number of things `:Review push` would send (for the whole review).
 function M.status()
   local counts = {}
   for _, e in ipairs(shown[vim.api.nvim_get_current_buf()] or {}) do
@@ -344,6 +359,10 @@ function M.status()
       table.insert(parts, "%#" .. style.hl .. "#" .. style.icon .. " " .. counts[kind])
     end
   end
+  local n = to_send[roots[vim.api.nvim_get_current_buf()] or ""]
+  if n and n > 0 then
+    table.insert(parts, "%#" .. M.style.send.hl .. "#" .. M.style.send.icon .. " " .. n)
+  end
   return table.concat(parts, " ")
 end
 
@@ -351,11 +370,14 @@ end
 function M.refresh()
   local ctx = context()
   if not ctx then return end
-  local entries = nf.parse(read_lines(ctx.path))
+  local lines = read_lines(ctx.path)
+  to_send[ctx.root] = count_to_send(lines)
+  local entries = nf.parse(lines)
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     refresh_buffer(buf, entries, ctx.root)
   end
   show_cursor_notes()
+  vim.cmd.redrawstatus({ bang = true })
 end
 
 local function append(path, text)
@@ -474,27 +496,6 @@ function M.toggle_pending()
     ("review: %s %s"):format(e.kind, e.draft and "approved, will be sent" or "pending, held back from push"),
     vim.log.levels.INFO
   )
-end
-
---- Mark the note under the cursor as seen (drop its [new] tag).
-function M.seen()
-  local ctx = context()
-  if not ctx then return end
-  local lines = load(ctx.path)
-  local e, idx = entry_at_cursor(lines)
-  if not e or not idx then return end
-  save(ctx.path, nf.edit_entry(lines, idx, function(x) x.new = false end))
-  M.refresh()
-end
-
---- Mark every note as seen.
-function M.seen_all()
-  local ctx = context()
-  if not ctx then return end
-  local lines, n = nf.clear_new(load(ctx.path))
-  if n > 0 then save(ctx.path, lines) end
-  M.refresh()
-  vim.notify(("review: %d marked as seen"):format(n), vim.log.levels.INFO)
 end
 
 --- Open the notes file in a split (for editing, reordering, the summary).
@@ -735,7 +736,6 @@ local commands = {
   pull = M.pull,
   sync = M.sync,
   clean = M.clean,
-  seen = M.seen_all,
 }
 
 function M.setup(opts)
@@ -745,7 +745,10 @@ function M.setup(opts)
     group = group,
     callback = function(ev)
       local ctx = context()
-      if ctx then refresh_buffer(ev.buf, nf.parse(read_lines(ctx.path)), ctx.root) end
+      if not ctx then return end
+      local lines = read_lines(ctx.path)
+      to_send[ctx.root] = count_to_send(lines)
+      refresh_buffer(ev.buf, nf.parse(lines), ctx.root)
     end,
   })
   -- Saving a source file writes the notes' new positions back to the notes
@@ -774,7 +777,9 @@ function M.setup(opts)
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
     group = group,
-    callback = function(ev) shown[ev.buf] = nil end,
+    callback = function(ev)
+      shown[ev.buf], roots[ev.buf] = nil, nil
+    end,
   })
   set_highlights()
   vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = set_highlights })
@@ -785,13 +790,13 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("Review", function(opts)
     local fn = commands[opts.args]
     if not fn then
-      vim.notify("review: usage :Review sync|push|pull|clean|seen", vim.log.levels.WARN)
+      vim.notify("review: usage :Review sync|push|pull|clean", vim.log.levels.WARN)
       return
     end
     fn()
   end, {
     nargs = 1,
-    desc = "Review notes: sync (pull then push), push (confirms), pull (remote threads), clean (drop resolved), seen (clear [new])",
+    desc = "Review notes: sync (pull then push), push (confirms), pull (remote threads), clean (drop resolved)",
     complete = function(lead)
       return vim.tbl_filter(function(c) return vim.startswith(c, lead) end, vim.tbl_keys(commands))
     end,
