@@ -1,8 +1,14 @@
 # review-notes.nvim
 
-Code review notes for Neovim, kept in a plain text file outside the code
-(`.git/review/<branch>.txt`) and synced with a remote through command lines
-you configure. The default backend is `git-lab` (dotfiles `bin/git-lab`).
+Code review notes for Neovim, kept in a plain text file outside the code and
+synced with a remote through command lines you configure. The default backend
+is `git-lab` (dotfiles `bin/git-lab`).
+
+- A file in a git worktree belongs to its branch's review,
+  `.git/review/<branch>.txt`, synced with the backend.
+- Any other file (a markdown draft, pi's plans) has its own review in a
+  sibling `<file>.notes` (e.g. `doc.md.notes`), local only: no backend,
+  `:Review sync` has nothing to do.
 
 - Notes show in the gutter with their own signs, follow the code while you edit.
 - Notes are written in a small markdown float under the code (`add`): `<CR>`
@@ -21,8 +27,8 @@ commands are available.
 
 ## Picker
 
-The plugin has no picker of its own. `require("review_notes").items()` returns
-the notes of the review, ready for any picker: each item has `file`, `line`,
+The plugin has no picker of its own. `require("review_notes").items(buf)`
+returns the notes of the buffer's review, ready for any picker: each item has `file`, `line`,
 `end_line`, `icon`, `hl`, `summary`, `summary_hl` and a searchable `text`
 (kind, state, path, note). Call `require("review_notes").goto_item(item)` to
 jump to one.

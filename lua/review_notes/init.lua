@@ -1,5 +1,7 @@
--- Pending review notes, kept outside the code in `.git/review/<branch>.txt`
--- (format: see notes.lua). Notes are written while reviewing, shown with their
+-- Pending review notes, kept outside the code (format: see notes.lua): for a
+-- file in a git worktree in `.git/review/<branch>.txt`, one review per branch;
+-- for any other file in a sibling `<file>.notes`, one review per file, local
+-- only (no backend). Notes are written while reviewing, shown with their
 -- own signs (deliberately not vim.diagnostic, so they never mix with LSP
 -- problems in ]d, pickers or counts), and synced with the remote through the
 -- configured backend commands (see M.config): pull brings the remote threads
@@ -49,10 +51,15 @@ M.style = {
   send = { icon = "\u{f093}", hl = "ReviewSend" },
 }
 
--- What a push would send, per repo root, and the root of each file buffer, for
--- the statusline (which must not run git on every redraw).
+---@class review_notes.Context
+---@field kind "git"|"file"
+---@field root string repo root, or the file's directory
+---@field path string the notes file
+
+-- What a push would send, per notes file, and the context of each file
+-- buffer, for the statusline (which must not run git on every redraw).
 local to_send = {} ---@type table<string, integer>
-local roots = {} ---@type table<integer, string>
+local contexts = {} ---@type table<integer, review_notes.Context>
 
 local function count_to_send(lines)
   local plan = nf.plan(lines)
@@ -103,16 +110,11 @@ local function read_lines(path)
   return lines
 end
 
--- Repo root and notes path for the file in the current buffer (or cwd), so
--- submodules get their own notes file. Files outside any repo (e.g. pi's
--- plans) belong to the cwd's review.
-local function context()
-  local name = vim.api.nvim_buf_get_name(0)
-  local dir = (name ~= "" and vim.bo.buftype == "") and vim.fs.dirname(name) or vim.fn.getcwd()
-  local root = git({ "rev-parse", "--show-toplevel" }, dir)
-    or git({ "rev-parse", "--show-toplevel" }, vim.fn.getcwd())
-  if not root then return nil end
+-- The review of the repo with worktree *root*: its branch's notes file.
+---@return review_notes.Context?
+local function git_context(root)
   local gitdir = git({ "rev-parse", "--path-format=absolute", "--git-path", "review" }, root)
+  if not gitdir then return nil end
   local branch = git({ "branch", "--show-current" }, root)
   -- Mid-rebase HEAD is detached; keep showing the rebased branch's notes.
   for _, dir in ipairs({ "rebase-merge", "rebase-apply" }) do
@@ -122,7 +124,58 @@ local function context()
     branch = lines[1] and lines[1]:gsub("^refs/heads/", "") or nil
   end
   if not branch or branch == "" then branch = "HEAD" end
-  return { root = root, path = gitdir .. "/" .. branch .. ".txt" }
+  return { kind = "git", root = root, path = gitdir .. "/" .. branch .. ".txt" }
+end
+
+-- Context of the repo containing *dir*, memoised per root in *memo* (one
+-- refresh walks every buffer). vim.fs.root finds the worktree without a
+-- process, so files outside git cost nothing; a submodule has its own root.
+---@return review_notes.Context?
+local function repo_context(dir, memo)
+  local root = vim.fn.isdirectory(dir) == 1 and vim.fs.root(dir, ".git") or nil
+  if not root then return nil end
+  if memo[root] == nil then memo[root] = git_context(root) or false end
+  return memo[root] or nil
+end
+
+-- The review a buffer belongs to: a file in a git worktree is in its
+-- branch's review, any other file has its own, in `<file>.notes` next to it.
+-- A notes file belongs to its document's review; other buffers (pickers,
+-- terminals, the branch notes file inside .git) to the cwd's repo, if any.
+---@param buf integer? defaults to the current buffer
+---@param memo table? cache shared by the calls of one refresh
+---@return review_notes.Context?
+local function context(buf, memo)
+  buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
+  memo = memo or {}
+  local name = vim.api.nvim_buf_get_name(buf)
+  if name == "" or vim.bo[buf].buftype ~= "" or name:find("/.git/", 1, true) then
+    return repo_context(vim.fn.getcwd(), memo)
+  end
+  local dir = vim.fs.dirname(name)
+  if name:match("%.notes$") then return { kind = "file", root = dir, path = name } end
+  return repo_context(dir, memo) or { kind = "file", root = dir, path = name .. ".notes" }
+end
+
+-- The review that remote commands act on: the current buffer's when it is a
+-- branch review, else the cwd's repo (e.g. `:Review sync` from the plan).
+---@return review_notes.Context?
+local function remote_context()
+  local ctx = context()
+  if ctx and ctx.kind == "git" then return ctx end
+  ctx = repo_context(vim.fn.getcwd(), {})
+  if not ctx then notify("local review (no git repository): nothing to sync") end
+  return ctx
+end
+
+-- A file whose notes this buffer shows (not a notes file itself).
+local function is_reviewed(buf)
+  local name = vim.api.nvim_buf_get_name(buf)
+  return vim.api.nvim_buf_is_loaded(buf)
+    and vim.bo[buf].buftype == ""
+    and name ~= ""
+    and not name:match("%.notes$")
+    and not name:find("/.git/", 1, true)
 end
 
 -- The notes file may also be open in a buffer (<leader>ro). Changes made
@@ -204,12 +257,12 @@ local function draw_signs(buf)
   end
 end
 
-local function refresh_buffer(buf, entries, root)
-  if not vim.api.nvim_buf_is_loaded(buf) or vim.bo[buf].buftype ~= "" then return end
+---@param ctx review_notes.Context
+local function refresh_buffer(buf, entries, ctx)
+  if not is_reviewed(buf) then return end
   local name = vim.api.nvim_buf_get_name(buf)
-  if name == "" then return end
-  roots[buf] = root
-  local rel = note_path(name, root)
+  contexts[buf] = ctx
+  local rel = note_path(name, ctx.root)
   -- Unsaved edits: the file's line numbers are stale, keep where the notes
   -- have moved to (matched by their location in the file).
   local live = {} ---@type table<string, integer[]>
@@ -363,22 +416,41 @@ function M.status()
       table.insert(parts, "%#" .. style.hl .. "#" .. style.icon .. " " .. counts[kind])
     end
   end
-  local n = to_send[roots[vim.api.nvim_get_current_buf()] or ""]
+  local ctx = contexts[vim.api.nvim_get_current_buf()]
+  local n = ctx and ctx.kind == "git" and to_send[ctx.path]
   if n and n > 0 then
     table.insert(parts, "%#" .. M.style.send.hl .. "#" .. M.style.send.icon .. " " .. n)
   end
   return table.concat(parts, " ")
 end
 
---- Re-read the notes file and update the signs in all loaded buffers.
+-- Read *ctx*'s notes file (once per refresh, through *cache*).
+local function entries_of(ctx, cache)
+  if not cache[ctx.path] then
+    local lines = read_lines(ctx.path)
+    if ctx.kind == "git" then to_send[ctx.path] = count_to_send(lines) end
+    cache[ctx.path] = nf.parse(lines)
+  end
+  return cache[ctx.path]
+end
+
+local function refresh_one(buf, memo, cache)
+  local ctx = context(buf, memo)
+  if ctx then
+    refresh_buffer(buf, entries_of(ctx, cache), ctx)
+  elseif shown[buf] then
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    shown[buf], contexts[buf] = nil, nil
+    draw_signs(buf)
+  end
+end
+
+--- Re-read the notes files and update the signs in all loaded buffers, each
+--- from its own review (a branch's, or a file's sibling notes).
 function M.refresh()
-  local ctx = context()
-  if not ctx then return end
-  local lines = read_lines(ctx.path)
-  to_send[ctx.root] = count_to_send(lines)
-  local entries = nf.parse(lines)
+  local memo, cache = {}, {}
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    refresh_buffer(buf, entries, ctx.root)
+    if is_reviewed(buf) then refresh_one(buf, memo, cache) end
   end
   show_cursor_notes()
   vim.cmd.redrawstatus({ bang = true })
@@ -449,7 +521,7 @@ end
 --- a note (normal mode), reply to it or edit my latest text instead.
 function M.add()
   local ctx = context()
-  if not ctx or vim.bo.buftype ~= "" or vim.api.nvim_buf_get_name(0) == "" then
+  if not ctx or not is_reviewed(vim.api.nvim_get_current_buf()) then
     vim.notify("review: not a file", vim.log.levels.WARN)
     return
   end
@@ -535,7 +607,7 @@ end
 function M.open()
   local ctx = context()
   if not ctx then
-    vim.notify("review: not in a git repository", vim.log.levels.WARN)
+    vim.notify("review: no review here (not a file, not in a git repository)", vim.log.levels.WARN)
     return
   end
   vim.fn.mkdir(vim.fs.dirname(ctx.path), "p")
@@ -551,7 +623,8 @@ end
 local function all_notes(ctx)
   local live = {} ---@type table<string, table>
   for buf, _ in pairs(shown) do
-    if vim.api.nvim_buf_is_valid(buf) then
+    -- Only buffers of this review: src indices of other notes files collide.
+    if vim.api.nvim_buf_is_valid(buf) and contexts[buf] and contexts[buf].path == ctx.path then
       for _, n in ipairs(live_notes(buf)) do
         live[n.e.path .. "\0" .. n.e.src] = n
       end
@@ -595,10 +668,12 @@ end
 ---@field summary_hl string
 ---@field note table the note, for `M.goto_item`
 
---- All notes of the review as picker items, across files, resolved included.
+--- All notes of the review as picker items, across files, resolved included:
+--- the branch's review for a file in git, the file's own for any other file.
+---@param buf integer? whose review (default: the current buffer)
 ---@return review_notes.Item[]
-function M.items()
-  local ctx = context()
+function M.items(buf)
+  local ctx = context(buf)
   if not ctx then return {} end
   local items = {}
   for _, n in ipairs(all_notes(ctx)) do
@@ -663,7 +738,7 @@ end
 
 --- Bring the remote threads into the notes (remote wins).
 function M.pull()
-  local ctx = context()
+  local ctx = remote_context()
   if not ctx then return end
   vim.cmd("silent! wall")
   backend.async(function() pull(ctx) end)
@@ -730,7 +805,7 @@ local function push(ctx, opts)
 end
 
 function M.push()
-  local ctx = context()
+  local ctx = remote_context()
   if not ctx then return end
   vim.cmd("silent! wall")
   backend.async(function() push(ctx) end)
@@ -741,7 +816,7 @@ end
 --- (remote wins). Cancelling the push stops there. A push ends with a pull of
 --- its own, so a separate one only runs when nothing was sent.
 function M.sync()
-  local ctx = context()
+  local ctx = remote_context()
   if not ctx then return end
   vim.cmd("silent! wall")
   backend.async(function()
@@ -773,11 +848,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("BufReadPost", {
     group = group,
     callback = function(ev)
-      local ctx = context()
-      if not ctx then return end
-      local lines = read_lines(ctx.path)
-      to_send[ctx.root] = count_to_send(lines)
-      refresh_buffer(ev.buf, nf.parse(lines), ctx.root)
+      if is_reviewed(ev.buf) then refresh_one(ev.buf, {}, {}) end
     end,
   })
   -- Saving a source file writes the notes' new positions back to the notes
@@ -785,7 +856,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
     callback = function(ev)
-      local ctx = context()
+      local ctx = is_reviewed(ev.buf) and contexts[ev.buf]
       if ctx then sync(ev.buf, ctx) end
       M.refresh()
     end,
@@ -807,7 +878,7 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("BufWipeout", {
     group = group,
     callback = function(ev)
-      shown[ev.buf], roots[ev.buf] = nil, nil
+      shown[ev.buf], contexts[ev.buf] = nil, nil
     end,
   })
   set_highlights()
