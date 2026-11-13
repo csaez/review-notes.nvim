@@ -5,6 +5,9 @@ Code review notes for Neovim, kept in a plain text file outside the code
 you configure. The default backend is `git-lab` (dotfiles `bin/git-lab`).
 
 - Notes show in the gutter with their own signs, follow the code while you edit.
+- Notes are written in a small markdown float under the code (`add`): `<CR>`
+  or `:w` sends, `q` closes and keeps the text as a draft. On a note it edits
+  my latest text: the whole note until someone answers, then my reply.
 - `:Review sync` (push, then pull), `push`, `pull`, `clean`.
 - Tags: `[resolved]`, `[draft]` (pending, never sent), `[id:X]` (remote
   thread), `[new]` (changed on the remote since the last pull; stays until you

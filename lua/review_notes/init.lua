@@ -84,6 +84,10 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "ReviewSend", { default = true, link = "DiagnosticInfo" })
 end
 
+local function notify(msg, level)
+  vim.notify(msg, level or vim.log.levels.INFO, { title = "review" })
+end
+
 local function git(args, cwd)
   local out = vim.system(vim.list_extend({ "git" }, args), { cwd = cwd, text = true }):wait()
   if out.code ~= 0 then return nil end
@@ -380,18 +384,12 @@ function M.refresh()
   vim.cmd.redrawstatus({ bang = true })
 end
 
-local function append(path, text)
+---@param entry string[]
+local function append(path, entry)
   local lines = load(path)
   if #lines > 0 and lines[#lines] ~= "" then table.insert(lines, "") end
-  vim.list_extend(lines, vim.split(text, "\n", { plain = true }))
+  vim.list_extend(lines, entry)
   save(path, lines)
-end
-
--- Last line index of the entry starting at *idx* (its continuation lines).
-local function entry_end(lines, idx)
-  local last = idx
-  while lines[last + 1] and lines[last + 1]:match("^%s+%S") do last = last + 1 end
-  return last
 end
 
 -- The visible entry on the cursor row, preferring one whose icon is there.
@@ -404,51 +402,86 @@ local function entry_on_cursor_row()
   return here[1] and here[1].e
 end
 
--- Replying to an entry: a thread gets my (unsent) reply under it, a note gets
--- more text, and a resolved entry is reopened. Either way it is no longer new.
-local function reply(ctx, e)
-  local prompt = e.resolved and "Reply (reopens): "
-    or e.id and ("Reply to " .. (e.head:match("^@[%w._-]+") or "thread") .. ": ")
-    or "Reply: "
-  vim.ui.input({ prompt = prompt }, function(text)
-    if not text or vim.trim(text) == "" then return end
-    local lines = load(ctx.path)
-    local idx = find_line(lines, e, {})
-    if not idx then return end
-    lines = nf.edit_entry(lines, idx, function(x)
-      x.resolved, x.new = false, false
-    end)
-    table.insert(lines, entry_end(lines, idx) + 1, "  " .. text)
-    save(ctx.path, lines)
-    M.refresh()
-  end)
+-- Virtual lines (a shown thread) under *row*, so the editor opens below them.
+local function virt_lines_at(buf, row)
+  local n = 0
+  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns_cursor, { row, 0 }, { row, -1 }, { details = true })) do
+    n = n + #((m[4] or {}).virt_lines or {})
+  end
+  return n
+end
+
+-- Open the editor on an entry with my latest turn (see notes.turn): the whole
+-- note while nobody has answered, else my reply after the last quoted line.
+-- Sending reopens a resolved entry and clears [new]: I have acted on it.
+local function reply(ctx, e, n)
+  local lines = load(ctx.path)
+  local idx = find_line(lines, e, {})
+  local turn = idx and nf.turn(lines, idx)
+  if not idx or not turn then return end
+  local who = e.head:match("^@[%w._-]+")
+  local title = (turn.whole and "Edit note " or (#turn.text > 0 and "Edit reply " or "Reply "))
+    .. (who and ("to " .. who .. " ") or "")
+    .. "at " .. e.loc
+    .. (e.resolved and " (reopens)" or "")
+  local buf = vim.api.nvim_get_current_buf()
+  require("review_notes.compose").open({
+    key = ctx.path .. "\0" .. (e.id or e.raw),
+    title = title,
+    initial = turn.text,
+    row = n.row,
+    end_row = n.end_row,
+    skip = virt_lines_at(buf, n.end_row),
+    on_submit = function(text)
+      local now = load(ctx.path)
+      local i = find_line(now, e, {})
+      if not i then return notify("the note moved in the notes file, nothing saved", vim.log.levels.WARN) end
+      save(ctx.path, nf.set_turn(now, i, text, function(x)
+        x.resolved, x.new = false, false
+      end))
+      M.refresh()
+    end,
+  })
 end
 
 --- Add a note for the cursor line, or the visual selection when called from
---- visual mode. On a line that already has a note (normal mode), reply to it
---- instead. The prompt is single-line; longer text is refined in the file.
+--- visual mode, in a small editor under the code. On a line that already has
+--- a note (normal mode), reply to it or edit my latest text instead.
 function M.add()
   local ctx = context()
-  if not ctx or vim.bo.buftype ~= "" then
-    vim.notify("review: not a file in a git repository", vim.log.levels.WARN)
+  if not ctx or vim.bo.buftype ~= "" or vim.api.nvim_buf_get_name(0) == "" then
+    vim.notify("review: not a file", vim.log.levels.WARN)
     return
   end
+  local buf = vim.api.nvim_get_current_buf()
   local first, last = vim.fn.line("."), vim.fn.line(".")
   local mode = vim.fn.mode()
-  local existing = mode == "n" and entry_on_cursor_row()
-  if existing then return reply(ctx, existing) end
+  if mode == "n" then
+    local row = first - 1
+    local here = notes_on_row(buf, row)
+    for _, n in ipairs(here) do
+      if n.end_row == row then return reply(ctx, n.e, n) end
+    end
+    if here[1] then return reply(ctx, here[1].e, here[1]) end
+  end
   if mode == "v" or mode == "V" or mode == "\22" then
     first, last = vim.fn.line("v"), vim.fn.line(".")
     if first > last then first, last = last, first end
-    vim.api.nvim_feedkeys(vim.keycode("<esc>"), "n", false)
+    vim.api.nvim_feedkeys(vim.keycode("<esc>"), "nx", false)
   end
   local rel = note_path(vim.api.nvim_buf_get_name(0), ctx.root)
   local loc = rel .. ":" .. first .. (last ~= first and ("-" .. last) or "")
-  vim.ui.input({ prompt = "Note " .. loc .. ": " }, function(text)
-    if not text or vim.trim(text) == "" then return end
-    append(ctx.path, loc .. ": " .. text)
-    M.refresh()
-  end)
+  require("review_notes.compose").open({
+    key = ctx.path .. "\0" .. loc,
+    title = "Note at " .. loc,
+    row = first - 1,
+    end_row = last - 1,
+    skip = virt_lines_at(buf, last - 1),
+    on_submit = function(text)
+      append(ctx.path, nf.new_entry_lines(loc, text))
+      M.refresh()
+    end,
+  })
 end
 
 -- The note under the cursor and the index of its line in the notes file.
@@ -595,10 +628,6 @@ end
 --- Open an item from `M.items()` at its icon line and show its text.
 ---@param item review_notes.Item
 function M.goto_item(item) goto_note(item.note) end
-
-local function notify(msg, level)
-  vim.notify(msg, level or vim.log.levels.INFO, { title = "review" })
-end
 
 -- Ask inside an async function; yields until answered.
 ---@return string?

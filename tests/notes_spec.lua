@@ -18,11 +18,30 @@ describe("parse", function()
     assert.are.equal(2, e[2].src)
   end)
 
-  it("joins indented continuation lines", function()
-    local e = notes.parse({ "a.c:3: first", "  second", "", "  third", "b.c:1: x" })
-    assert.are.equal("first\nsecond\nthird", e[1].text)
+  it("joins indented continuation lines, keeping paragraphs", function()
+    local e = notes.parse({ "a.c:3: first", "  second", "", "  third", "", "b.c:1: x" })
+    assert.are.equal("first\nsecond\n\nthird", e[1].text)
+    assert.are.same({ "second", "", "third" }, e[1].mine)
     assert.are.equal(4, e[1].last)
     assert.are.equal("note", e[1].kind)
+  end)
+
+  it("keeps the indentation of code in a note", function()
+    local e = notes.parse({ "a.c:3: try", "  if x:", "      return 1", "\tdeep" })[1]
+    assert.are.same({ "if x:", "    return 1", "deep" }, e.mine)
+  end)
+
+  it("reads an escaped > as my text, not as a remote line", function()
+    local e = notes.parse({ "a.c:1: [id:t1] @al: why", "  > @bo: +1", "  \\> as you said", "  mine" })[1]
+    assert.are.same({ "> @bo: +1" }, e.quoted)
+    assert.are.same({ "\\> as you said", "mine" }, e.mine)
+    assert.are.equal("@al: why\n> @bo: +1\n> as you said\nmine", e.text)
+    assert.are.equal("> as you said\nmine", notes.plan({ "a.c:1: [id:t1] @al: why", "  \\> as you said", "  mine" }).replies[1].send)
+  end)
+
+  it("drops blank lines around quoted lines", function()
+    local e = notes.parse({ "a.c:1: [id:t1] @al: why", "", "  > @bo: +1", "", "  mine" })[1]
+    assert.are.same({ "mine" }, e.mine)
   end)
 
   it("ignores lines that only look like entries", function()
@@ -237,5 +256,38 @@ describe("edits", function()
       "a.c:3: [resolved] [id:c] z",
       "a.c:5: open",
     }, out)
+  end)
+end)
+
+describe("turns", function()
+  it("is the whole note while nobody answered", function()
+    local lines = { "x", "a.c:1: [draft] head", "  more", "", "  para", "b.c:1: y" }
+    local t = notes.turn(lines, 2)
+    assert.are.same({ whole = true, first = 2, last = 5, text = { "head", "more", "", "para" } }, t)
+    assert.are.same(
+      { "x", "a.c:1: [draft] new head", "  \\> quoted", "b.c:1: y" },
+      notes.set_turn(lines, 2, { "new head", "> quoted" })
+    )
+  end)
+
+  it("is my reply after the last quoted line", function()
+    local lines = { "a.c:1: [new] mine", "  > @pi: done", "  my answer" }
+    assert.are.same({ "my answer" }, notes.turn(lines, 1).text)
+    local out = notes.set_turn(lines, 1, { "longer", "", "answer" }, function(e) e.new = false end)
+    assert.are.same({ "a.c:1: mine", "  > @pi: done", "  longer", "", "  answer" }, out)
+  end)
+
+  it("is empty for a thread I have not answered", function()
+    local lines = { "a.c:1: [id:t1] @al: why", "  > @bo: +1", "a.c:2: other" }
+    local t = notes.turn(lines, 1)
+    assert.are.same({}, t.text)
+    assert.are.same(
+      { "a.c:1: [id:t1] @al: why", "  > @bo: +1", "  reply", "a.c:2: other" },
+      notes.set_turn(lines, 1, { "reply" })
+    )
+  end)
+
+  it("writes new entries with escaped and blank lines", function()
+    assert.are.same({ "a.c:1-2: head", "", "  \\> q", "  code" }, notes.new_entry_lines("a.c:1-2", { "head", "", "> q", "code" }))
   end)
 end)

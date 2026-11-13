@@ -21,11 +21,34 @@
 --            until I reply to the thread or resolve it.
 -- Quoted (`> `) lines are a cache of the remote thread, rewritten on pull
 -- (remote wins). Other indented lines are mine and pull never touches them.
+-- Body lines lose exactly their two-space indent, so code keeps its own
+-- indentation, and blank lines between my lines are kept (paragraphs). A line
+-- of mine that starts with `>` is written as `\>` so it is not read as quoted.
 -- Lines starting with `#` are ignored. Absolute paths are notes on files
 -- outside the repo and are never sent.
 local M = {}
 
 local RESOLVED_MARK = "> (resolved)"
+
+--- Escape a line of my text so it is not read as a quoted (remote) line.
+---@param line string
+---@return string
+function M.escape(line)
+  return line:match("^\\*>") and ("\\" .. line) or line
+end
+
+---@param line string
+---@return string
+function M.unescape(line)
+  return line:match("^\\+>") and line:sub(2) or line
+end
+
+-- Body line without its indent: two spaces (or a tab) as written by render;
+-- anything else is trimmed, for hand-written files.
+local function dedent(raw)
+  local l = raw:match("^  (.*)$") or raw:match("^\t(.*)$") or vim.trim(raw)
+  return (l:gsub("%s+$", ""))
+end
 
 ---@class review_notes.Entry
 ---@field path string
@@ -82,18 +105,37 @@ local function new_entry(i, raw, path, first, last, text)
 end
 
 local function finish(e)
+  -- scan only keeps blank lines that have body lines after them.
   e.quoted, e.mine, e.remote_resolved = {}, {}, false
+  local blanks, prev = 0, nil
   for _, l in ipairs(e.body) do
-    if l == RESOLVED_MARK then
-      e.remote_resolved = true
-    elseif l:sub(1, 1) == ">" then
-      table.insert(e.quoted, l)
+    if l == "" then
+      blanks = blanks + 1
     else
-      table.insert(e.mine, l)
+      local kind = l == RESOLVED_MARK and "mark" or l:sub(1, 1) == ">" and "quoted" or "mine"
+      if kind == "mark" then
+        e.remote_resolved = true
+      elseif kind == "quoted" then
+        table.insert(e.quoted, l)
+      else
+        -- Paragraph breaks only count inside my own text.
+        if prev == "mine" then
+          for _ = 1, blanks do table.insert(e.mine, "") end
+        end
+        table.insert(e.mine, l)
+      end
+      blanks, prev = 0, kind
     end
   end
   e.kind = e.id and "thread" or "note"
-  e.text = table.concat(vim.list_extend({ e.head }, e.body), "\n")
+  e.text = table.concat(vim.list_extend({ e.head }, vim.tbl_map(M.unescape, e.body)), "\n")
+end
+
+--- My lines of *e* as text (unescaped), for display and sending.
+---@param lines string[]
+---@return string
+function M.my_text(lines)
+  return table.concat(vim.tbl_map(M.unescape, lines), "\n")
 end
 
 ---@param lines string[]
@@ -102,6 +144,7 @@ end
 local function scan(lines)
   local entries, summary = {}, {}
   local cur ---@type review_notes.Entry?
+  local blanks = 0 -- blank lines seen in the current entry, kept if more body follows
   for i, raw in ipairs(lines) do
     -- `path:line: text` or `path:first-last: text`
     local path, first, last, text = raw:match("^([^%s#>:][^%s:]*):(%d+)%-(%d+):%s?(.*)$")
@@ -111,12 +154,14 @@ local function scan(lines)
     if path then
       cur = new_entry(i, raw, path, first, last, text or "")
       table.insert(entries, cur)
+      blanks = 0
+    elseif cur and raw:match("^%s*$") then
+      blanks = blanks + 1
     elseif cur and raw:match("^%s") then
-      local body = vim.trim(raw)
-      if body ~= "" then
-        table.insert(cur.body, body)
-        cur.last = i
-      end
+      for _ = 1, blanks do table.insert(cur.body, "") end
+      blanks = 0
+      table.insert(cur.body, dedent(raw))
+      cur.last = i
     elseif not raw:match("^%s*$") then
       cur = nil
       if not raw:match("^#") then table.insert(summary, i) end
@@ -200,6 +245,71 @@ function M.edit_entry(lines, idx, fn)
       out[idx] = M.head_line(e)
       break
     end
+  end
+  return out
+end
+
+local function entry_at(lines, idx)
+  for _, e in ipairs(M.parse(lines)) do
+    if e.src == idx then return e end
+  end
+end
+
+---@class review_notes.Turn
+---@field whole boolean the turn is the whole note, head included
+---@field first integer first line of the turn in the file
+---@field last integer last line (first - 1 when the turn is empty)
+---@field text string[] the turn as plain text (no indent, unescaped)
+
+--- My latest turn in the entry at *idx*, which the editor opens with: the
+--- whole note while nobody has answered it, else my lines after the last
+--- quoted one (none when I have not answered yet).
+---@return review_notes.Turn?
+function M.turn(lines, idx)
+  local e = entry_at(lines, idx)
+  if not e then return nil end
+  local last_quote
+  for i = e.src + 1, e.last do
+    if dedent(lines[i]):sub(1, 1) == ">" then last_quote = i end
+  end
+  local whole = not last_quote and not e.id
+  local from = whole and e.src + 1 or (last_quote or e.src) + 1
+  local text = whole and { e.head } or {}
+  for i = from, e.last do
+    table.insert(text, M.unescape(dedent(lines[i])))
+  end
+  return { whole = whole, first = whole and e.src or from, last = e.last, text = text }
+end
+
+--- Replace my latest turn in the entry at *idx* (see `turn`) with *text*.
+--- *fn*, when given, edits the entry's tags.
+---@param text string[]
+---@param fn fun(e: review_notes.Entry)?
+---@return string[]
+function M.set_turn(lines, idx, text, fn)
+  local e, t = entry_at(lines, idx), M.turn(lines, idx)
+  if not e or not t then return lines end
+  if fn then fn(e) end
+  local repl = {}
+  if t.whole then
+    e.head = text[1] or ""
+    repl[1] = M.head_line(e)
+  end
+  for i = t.whole and 2 or 1, #text do
+    table.insert(repl, text[i] == "" and "" or ("  " .. M.escape(text[i])))
+  end
+  local out = splice(lines, t.first, t.last, repl)
+  if not t.whole then out[idx] = M.head_line(e) end
+  return out
+end
+
+--- Lines of a new entry at *loc* with *text* (first line is the head).
+---@param text string[]
+---@return string[]
+function M.new_entry_lines(loc, text)
+  local out = { loc .. ": " .. text[1] }
+  for i = 2, #text do
+    table.insert(out, text[i] == "" and "" or ("  " .. M.escape(text[i])))
   end
   return out
 end
@@ -312,12 +422,12 @@ function M.plan(lines)
       if not e.resolved then plan.drafts = plan.drafts + 1 end
     elseif not e.id then
       if not e.resolved then
-        e.send = vim.trim(table.concat(vim.list_extend({ e.head }, e.mine), "\n"))
+        e.send = vim.trim(e.head .. "\n" .. M.my_text(e.mine))
         if e.send ~= "" then table.insert(plan.new, e) end
       end
     else
       if #e.mine > 0 then
-        e.send = table.concat(e.mine, "\n")
+        e.send = M.my_text(e.mine)
         table.insert(plan.replies, e)
       end
       if e.resolved ~= e.remote_resolved then table.insert(plan.states, e) end

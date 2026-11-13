@@ -234,3 +234,65 @@ describe("status", function()
     assert.is_nil(review.status():find(review.style.send.icon, 1, true))
   end)
 end)
+
+describe("compose", function()
+  local repo, notes_path
+
+  before_each(function()
+    vim.cmd("silent! %bwipeout!")
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+    vim.fn.writefile({ "one", "two", "three" }, repo .. "/a.c")
+    vim.cmd("cd " .. repo)
+    vim.cmd("edit a.c")
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
+      .. "/main.txt"
+  end)
+
+  after_each(function()
+    vim.cmd("silent! %bwipeout!")
+    vim.fn.delete(repo, "rf")
+  end)
+
+  local function read() return vim.fn.filereadable(notes_path) == 1 and vim.fn.readfile(notes_path) or {} end
+  local function type_and(lines, finish)
+    vim.cmd.stopinsert()
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
+    vim.cmd("doautocmd TextChanged") -- not fired for API edits in headless specs
+    if finish == "write" then vim.cmd("write") else vim.cmd("close") end
+  end
+
+  it("adds a multiline note from the float", function()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    review.add()
+    assert.are.equal("markdown", vim.bo.filetype)
+    assert.are.equal("win", vim.api.nvim_win_get_config(0).relative)
+    type_and({ "first line", "", "  code()", "> not quoted" }, "write")
+    assert.are.same({ "a.c:2: first line", "", "    code()", "  \\> not quoted" }, read())
+    assert.are.equal(vim.fn.bufnr(repo .. "/a.c"), vim.api.nvim_get_current_buf())
+  end)
+
+  it("keeps the text as a draft when closed without sending", function()
+    review.add()
+    type_and({ "half written" }, "close")
+    assert.are.same({}, read())
+    review.add()
+    assert.are.same({ "half written" }, vim.api.nvim_buf_get_lines(0, 0, -1, false))
+    type_and({ "done" }, "write")
+    assert.are.same({ "a.c:1: done" }, read())
+  end)
+
+  it("edits my note, then replies after an answer", function()
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({ "a.c:1: [resolved] [new] mine", "  > @pi: done" }, notes_path)
+    review.refresh()
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    review.add()
+    assert.are.same({ "" }, vim.api.nvim_buf_get_lines(0, 0, -1, false))
+    type_and({ "not quite" }, "write")
+    assert.are.same({ "a.c:1: mine", "  > @pi: done", "  not quite" }, read())
+    review.add()
+    assert.are.same({ "not quite" }, vim.api.nvim_buf_get_lines(0, 0, -1, false))
+  end)
+end)
