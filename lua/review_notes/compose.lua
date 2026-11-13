@@ -1,12 +1,13 @@
 -- The note editor: a small markdown float anchored at the code it is about,
--- like GitLab's inline reply box. <CR> (normal mode) or :w sends, q closes.
+-- like GitLab's inline reply box. <CR> (normal mode) or :w sends, q or <Esc>
+-- (normal mode) closes.
 -- Closing without sending keeps the text as a draft for the same location, so
 -- an accidental q loses nothing; empty the buffer and close to drop it.
 local M = {}
 
 local drafts = {} ---@type table<string, string[]>
 
-M.keys = { submit = "<CR>", close = "q" }
+M.keys = { submit = "<CR>", close = { "q", "<Esc>" } }
 
 -- Lines of *lines* without leading and trailing blank lines.
 local function strip(lines)
@@ -31,10 +32,10 @@ end
 ---@return integer win
 function M.open(opts)
   local src_win = vim.api.nvim_get_current_win()
-  local info = assert(vim.fn.getwininfo(src_win)[1])
-  local text_width = info.width - info.textoff
+  local win_width = vim.api.nvim_win_get_width(src_win)
+  local text_width = win_width - (vim.fn.getwininfo(src_win)[1] or { textoff = 0 }).textoff
   local indent = math.min(vim.fn.indent(opts.end_row + 1), math.max(0, text_width - 50))
-  local width = math.max(20, math.min(90, text_width - indent - 2))
+  local width = math.floor(math.max(20, math.min(90, text_width - indent - 2)))
   local height = 8
 
   local buf = vim.api.nvim_create_buf(false, true)
@@ -52,7 +53,8 @@ function M.open(opts)
   -- run off the window, so the float never covers the line it is about.
   local skip = opts.skip or 0
   local below = vim.fn.screenpos(src_win, opts.end_row + 1, 1).row
-  local room = (info.winrow + info.height - 1) - (below + skip)
+  local bottom = vim.fn.win_screenpos(src_win)[1] + vim.api.nvim_win_get_height(src_win) - 1
+  local room = bottom - (below + skip)
   local config = {
     relative = "win",
     win = src_win,
@@ -61,7 +63,7 @@ function M.open(opts)
     border = "rounded",
     title = " " .. opts.title .. " ",
     title_pos = "left",
-    footer = " " .. M.keys.submit .. " send  :w send  " .. M.keys.close .. " close (keeps draft) ",
+    footer = " " .. M.keys.submit .. " send  :w send  " .. table.concat(M.keys.close, "/") .. " close (keeps draft) ",
     footer_pos = "right",
     style = "minimal",
   }
@@ -120,7 +122,9 @@ function M.open(opts)
     callback = function() vim.schedule(close) end,
   })
   vim.keymap.set("n", M.keys.submit, submit, { buffer = buf, desc = "Review: send note" })
-  vim.keymap.set("n", M.keys.close, close, { buffer = buf, desc = "Review: close (keeps draft)" })
+  for _, key in ipairs(M.keys.close) do
+    vim.keymap.set("n", key, close, { buffer = buf, desc = "Review: close (keeps draft)" })
+  end
   if #initial == 0 then vim.cmd.startinsert() end
   return win
 end

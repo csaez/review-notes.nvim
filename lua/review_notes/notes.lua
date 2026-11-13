@@ -17,8 +17,10 @@
 -- Tags after the location, in this order: [resolved] [draft] [id:X] [new].
 --   [draft]  never sent; removing it approves the entry (notes and replies).
 --   [id:X]   the remote thread id; entries without one are new threads.
---   [new]    set by pull when a thread is new or its comments changed; stays
---            until I reply to the thread or resolve it.
+--   [new]    someone else changed the entry since I last acted on it: set by
+--            pull (a thread is new or its comments changed) and by pi after a
+--            round (an entry it added or changed). Stays until I reply,
+--            resolve, reopen or accept it.
 -- Quoted (`> `) lines are a cache of the remote thread, rewritten on pull
 -- (remote wins). Other indented lines are mine and pull never touches them.
 -- Body lines lose exactly their two-space indent, so code keeps its own
@@ -29,6 +31,8 @@
 local M = {}
 
 local RESOLVED_MARK = "> (resolved)"
+-- How pi asks under a note (coding-workflow.ts, /fixup).
+M.PI_QUESTION = "> @pi: QUESTION:"
 
 --- Escape a line of my text so it is not read as a quoted (remote) line.
 ---@param line string
@@ -65,6 +69,7 @@ end
 ---@field quoted string[] remote cache, without the resolved marker
 ---@field mine string[] my unsent lines
 ---@field remote_resolved boolean the thread's resolved state as of the last pull
+---@field my_turn boolean open and ending with a question from pi: waiting for my answer
 ---@field src integer line of the entry head in the file
 ---@field last integer last line of the entry
 ---@field loc string location as written, e.g. "a.py:3-5"
@@ -129,6 +134,10 @@ local function finish(e)
   end
   e.kind = e.id and "thread" or "note"
   e.text = table.concat(vim.list_extend({ e.head }, vim.tbl_map(M.unescape, e.body)), "\n")
+  -- Remote threads have no such marker: pull flags their changes as [new]
+  -- (quoted lines do not say which author is me).
+  local last = prev == "quoted" and e.quoted[#e.quoted] or ""
+  e.my_turn = not e.resolved and vim.startswith(last, M.PI_QUESTION)
 end
 
 --- My lines of *e* as text (unescaped), for display and sending.

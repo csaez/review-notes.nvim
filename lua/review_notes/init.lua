@@ -16,6 +16,7 @@ local backend = require("review_notes.backend")
 local M = {}
 
 ---@class review_notes.Config
+---@field watch boolean refresh when a shown notes file changes on disk
 ---@field backend table<string, string[]> Command lines, run in the repo root.
 ---  `{path}`, `{line}` and `{thread}` are substituted; text goes on stdin.
 ---    threads    prints [{id, path, line, resolved, comments = [{author, body}]}]
@@ -25,6 +26,8 @@ local M = {}
 ---    submit     optional: publishes what add/reply queued; the summary is on stdin
 ---    discard    optional: drops what add/reply queued (used if submit fails)
 M.config = {
+  -- Watch the notes files shown, to follow changes made by pi or git-lab.
+  watch = true,
   backend = {
     threads = { "git-lab", "comment", "list", "--json" },
     add = { "git-lab", "comment", "add", "--draft", "{path}:{line}", "-" },
@@ -41,13 +44,14 @@ local ns_cursor = vim.api.nvim_create_namespace("review_notes_cursor")
 local ns_signs = vim.api.nvim_create_namespace("review_notes_signs")
 
 -- Nerd Font icons: comment, comment-discussion, pencil (draft), bell (new),
--- upload (things a push would send).
+-- question (pi asks me), upload (things a push would send).
 ---@type table<string, { icon: string, hl: string }>
 M.style = {
   note = { icon = "\u{ea6b}", hl = "ReviewNote" },
   thread = { icon = "\u{eac7}", hl = "ReviewThread" },
   draft = { icon = "\u{ea73}", hl = "ReviewDraft" },
   new = { icon = "\u{f0f3}", hl = "ReviewNew" },
+  ask = { icon = "\u{f128}", hl = "ReviewAsk" },
   send = { icon = "\u{f093}", hl = "ReviewSend" },
 }
 
@@ -59,6 +63,8 @@ M.style = {
 -- What a push would send, per notes file, and the context of each file
 -- buffer, for the statusline (which must not run git on every redraw).
 local to_send = {} ---@type table<string, integer>
+-- Entries waiting for me per notes file, to notify when that grows.
+local waiting = {} ---@type table<string, integer>
 local contexts = {} ---@type table<integer, review_notes.Context>
 
 local function count_to_send(lines)
@@ -89,6 +95,7 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "ReviewResolved", { default = true, link = "NonText" })
   vim.api.nvim_set_hl(0, "ReviewNew", { default = true, link = "DiagnosticWarn" })
   vim.api.nvim_set_hl(0, "ReviewSend", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "ReviewAsk", { default = true, link = "DiagnosticHint" })
 end
 
 local function notify(msg, level)
@@ -228,12 +235,25 @@ local function live_notes(buf)
   return result
 end
 
--- Icon and highlight for an entry: resolved entries are dimmed, new ones
--- (changed on the remote since I last looked) stand out, drafts are marked.
+-- What an entry needs from me, most urgent first: a question to answer,
+-- something someone else changed (new, even if resolved: pi resolving a note
+-- is a claim to check), a draft to approve, else just its kind.
+local function state(e)
+  if e.my_turn then return "ask" end
+  if e.new then return "new" end
+  if e.resolved then return "resolved" end
+  return e.draft and "draft" or e.kind
+end
+
+-- Needs my attention: answered by pi, changed by someone else.
+local function wants_me(e) return e.my_turn or e.new end
+
+-- Icon and highlight for an entry: resolved entries are dimmed, the ones
+-- waiting for me stand out, drafts are marked.
 local function look(e)
-  if e.resolved then return "\u{f00c}", "ReviewResolved" end
-  local style = M.style[e.new and "new" or e.draft and "draft" or e.kind]
-  return style.icon, style.hl
+  local s = state(e)
+  if s == "resolved" then return "\u{f00c}", "ReviewResolved" end
+  return M.style[s].icon, M.style[s].hl
 end
 
 -- Gutter signs from the live positions, redrawn on every change so a range
@@ -403,14 +423,12 @@ end
 function M.status()
   local counts = {}
   for _, e in ipairs(shown[vim.api.nvim_get_current_buf()] or {}) do
-    -- Resolved entries are done; count what is still open.
-    if not e.resolved then
-      local kind = e.new and "new" or e.draft and "draft" or e.kind
-      counts[kind] = (counts[kind] or 0) + 1
-    end
+    -- Resolved entries are done, unless pi resolved them and I have not looked.
+    local s = state(e)
+    if s ~= "resolved" then counts[s] = (counts[s] or 0) + 1 end
   end
   local parts = {}
-  for _, kind in ipairs({ "new", "note", "thread", "draft" }) do
+  for _, kind in ipairs({ "ask", "new", "note", "thread", "draft" }) do
     if counts[kind] then
       local style = M.style[kind]
       table.insert(parts, "%#" .. style.hl .. "#" .. style.icon .. " " .. counts[kind])
@@ -424,12 +442,49 @@ function M.status()
   return table.concat(parts, " ")
 end
 
+-- Notes files are written by other processes (pi, git-lab): watch the ones
+-- shown, so the signs follow without waiting for focus. Watching the
+-- directory also catches files that are replaced (written by rename) or
+-- created after the buffer was opened (a first `.notes`).
+local watchers = {} ---@type table<string, uv.uv_fs_event_t>
+local pending = {} ---@type table<string, boolean>
+
+local function on_notes_changed(path)
+  if pending[path] then return end
+  pending[path] = true
+  -- Writers touch the file more than once; settle first.
+  vim.defer_fn(function()
+    pending[path] = nil
+    local before = waiting[path] or 0
+    M.refresh()
+    local now = waiting[path] or 0
+    if now > before then
+      notify(("%s: %d note%s waiting for you"):format(
+        vim.fs.basename(path), now, now == 1 and "" or "s"))
+    end
+  end, 150)
+end
+
+local function watch(path)
+  local dir = vim.fs.dirname(path)
+  if watchers[path] or vim.fn.isdirectory(dir) == 0 then return end
+  local w = vim.uv.new_fs_event()
+  if not w then return end
+  local name = vim.fs.basename(path)
+  local ok = w:start(dir, {}, function(err, file)
+    if not err and (file == nil or file == name) then vim.schedule(function() on_notes_changed(path) end) end
+  end)
+  if ok then watchers[path] = w else w:close() end
+end
+
 -- Read *ctx*'s notes file (once per refresh, through *cache*).
 local function entries_of(ctx, cache)
   if not cache[ctx.path] then
     local lines = read_lines(ctx.path)
     if ctx.kind == "git" then to_send[ctx.path] = count_to_send(lines) end
     cache[ctx.path] = nf.parse(lines)
+    waiting[ctx.path] = #vim.tbl_filter(wants_me, cache[ctx.path])
+    if M.config.watch then watch(ctx.path) end
   end
   return cache[ctx.path]
 end
@@ -576,14 +631,19 @@ function M.toggle_resolved()
   local lines = load(ctx.path)
   local e, idx = entry_at_cursor(lines)
   if not e or not idx then return end
+  -- Resolved by someone else (pi, the remote) and not seen yet: the first
+  -- toggle accepts it as it is.
+  local accept = e.resolved and e.new
   save(ctx.path, nf.edit_entry(lines, idx, function(x)
-    x.resolved, x.new = not x.resolved, false
+    if accept then
+      x.new = false
+    else
+      x.resolved, x.new = not x.resolved, false
+    end
   end))
   M.refresh()
-  vim.notify(
-    ("review: %s %s (<leader>rd again to undo)"):format(e.kind, e.resolved and "reopened" or "resolved"),
-    vim.log.levels.INFO
-  )
+  local what = accept and "accepted (stays resolved)" or e.resolved and "reopened" or "resolved"
+  vim.notify(("review: %s %s (<leader>rd again to %s)"):format(e.kind, what, accept and "reopen" or "undo"), vim.log.levels.INFO)
 end
 
 --- Toggle the note under the cursor between pending and approved. A pending
@@ -657,6 +717,46 @@ local function goto_note(n)
   show_cursor_notes()
 end
 
+--- Jump to the next (dir = 1) or previous (dir = -1) note waiting for me (a
+--- pi question, or [new]: changed by pi or the remote) across the files of
+--- the review, wrapping around: the way through a round of answers.
+function M.jump_new(dir)
+  local ctx = context()
+  if not ctx then return end
+  local list = vim.tbl_filter(function(n) return wants_me(n.e) end, all_notes(ctx))
+  if #list == 0 then return notify("nothing new in this review") end
+  local here = { file = vim.api.nvim_buf_get_name(0), line = vim.fn.line(".") }
+  local function after(n)
+    if n.file ~= here.file then return n.file > here.file end
+    return n.end_line > here.line
+  end
+  local function before(n)
+    if n.file ~= here.file then return n.file < here.file end
+    return n.end_line < here.line
+  end
+  local target
+  if dir > 0 then
+    for _, n in ipairs(list) do
+      if after(n) then
+        target = n
+        break
+      end
+    end
+    target = target or list[1]
+  else
+    for i = #list, 1, -1 do
+      if before(list[i]) then
+        target = list[i]
+        break
+      end
+    end
+    target = target or list[#list]
+  end
+  goto_note(target)
+  local count = #list
+  vim.api.nvim_echo({ { ("review: %d waiting for you"):format(count), "ReviewNew" } }, false, {})
+end
+
 ---@class review_notes.Item
 ---@field text string searchable text: kind, state, path and the note ("new", "draft", "resolved", ...)
 ---@field file string absolute path
@@ -683,6 +783,7 @@ function M.items(buf)
         n.e.kind,
         n.e.resolved and "resolved" or "open",
         n.e.new and "new" or "",
+        n.e.my_turn and "ask question" or "",
         n.e.draft and "draft" or "",
         n.e.path,
         n.e.text,

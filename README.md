@@ -16,8 +16,14 @@ is `git-lab` (dotfiles `bin/git-lab`).
   my latest text: the whole note until someone answers, then my reply.
 - `:Review sync` (push, then pull), `push`, `pull`, `clean`.
 - Tags: `[resolved]`, `[draft]` (pending, never sent), `[id:X]` (remote
-  thread), `[new]` (changed on the remote since the last pull; stays until you
-  reply to the thread or resolve it).
+  thread), `[new]` (someone else changed it since you last acted on it: pull
+  for remote threads, pi after a round; stays until you reply, resolve,
+  reopen or accept it).
+- What waits for you stands out: `[new]` entries (even resolved ones, since
+  pi resolving a note is a claim to check; the first resolve toggle accepts
+  it) and notes ending with a pi question. `jump_new(1/-1)` goes through
+  them across the files of the review (`]R`/`[R` in the dotfiles); shown notes files are watched, so
+  changes made by pi or git-lab show up right away.
 - File format: see the header of `lua/review_notes/notes.lua`.
 - Backend contract: see `M.config` in `lua/review_notes/init.lua`.
 

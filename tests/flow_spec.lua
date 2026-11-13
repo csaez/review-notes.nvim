@@ -363,3 +363,65 @@ describe("files outside git", function()
     assert.are.equal("reviewnotes", vim.bo.filetype)
   end)
 end)
+
+describe("after a pi round", function()
+  local dir, doc
+
+  before_each(function()
+    vim.cmd("silent! %bwipeout!")
+    dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    doc = dir .. "/doc.md"
+    vim.fn.writefile({ "a", "b", "c", "d" }, doc)
+    vim.fn.writefile({
+      "doc.md:1: [resolved] [new] reworded?",
+      "  > @pi: reworded",
+      "doc.md:2: mine",
+      "doc.md:3: why?",
+      "  > @pi: QUESTION: which way?",
+      "doc.md:4: [resolved] old",
+    }, doc .. ".notes")
+    vim.cmd("cd " .. dir)
+    vim.cmd("edit " .. doc)
+    review.refresh()
+  end)
+
+  after_each(function()
+    vim.cmd("silent! %bwipeout!")
+    vim.fn.delete(dir, "rf")
+  end)
+
+  it("counts what waits for me, including what pi resolved", function()
+    local status = review.status()
+    assert.is_truthy(status:find(review.style.ask.icon .. " 1", 1, true))
+    assert.is_truthy(status:find(review.style.new.icon .. " 1", 1, true))
+    assert.is_truthy(status:find(review.style.note.icon .. " 1", 1, true))
+  end)
+
+  it("goes through them with jump_new", function()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    review.jump_new(1)
+    assert.are.equal(3, vim.fn.line("."))
+    review.jump_new(1)
+    assert.are.equal(1, vim.fn.line("."))
+    review.jump_new(-1)
+    assert.are.equal(3, vim.fn.line("."))
+  end)
+
+  it("accepts a note pi resolved, then reopens it", function()
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    review.toggle_resolved()
+    assert.are.equal("doc.md:1: [resolved] reworded?", vim.fn.readfile(doc .. ".notes")[1])
+    review.toggle_resolved()
+    assert.are.equal("doc.md:1: reworded?", vim.fn.readfile(doc .. ".notes")[1])
+  end)
+
+  it("follows changes on disk", function()
+    local lines = vim.fn.readfile(doc .. ".notes")
+    lines[3] = "doc.md:2: [new] mine"
+    vim.fn.writefile(lines, doc .. ".notes")
+    assert.is_true(vim.wait(3000, function()
+      return review.status():find(review.style.new.icon .. " 2", 1, true) ~= nil
+    end, 50))
+  end)
+end)
