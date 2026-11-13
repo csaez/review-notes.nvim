@@ -425,3 +425,42 @@ describe("after a pi round", function()
     end, 50))
   end)
 end)
+
+describe("long notes", function()
+  local dir, doc
+
+  before_each(function()
+    vim.cmd("silent! %bwipeout!")
+    dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    doc = dir .. "/doc.md"
+    vim.fn.writefile({ "a", "b" }, doc)
+    vim.fn.writefile({ "doc.md:1: " .. string.rep("word ", 40), "    indented code line" }, doc .. ".notes")
+    vim.cmd("cd " .. dir)
+    vim.cmd("edit " .. doc)
+    vim.o.columns = 60
+    review.refresh()
+  end)
+
+  after_each(function()
+    vim.o.columns = 80
+    vim.cmd("silent! %bwipeout!")
+    vim.fn.delete(dir, "rf")
+  end)
+
+  it("wraps the shown text to the window, for display only", function()
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    vim.api.nvim_exec_autocmds("CursorMoved", {})
+    local ns = vim.api.nvim_get_namespaces().review_notes_cursor
+    local marks = vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })
+    local virt = marks[1][4].virt_lines
+    assert.is_true(#virt > 2)
+    local width = vim.api.nvim_win_get_width(0)
+    for _, l in ipairs(virt) do
+      assert.is_true(vim.fn.strdisplaywidth(l[1][1] .. l[2][1]) <= width)
+    end
+    assert.are.equal("  indented code line", virt[#virt][2][1])
+    -- The file keeps one logical line.
+    assert.are.equal(2, #vim.fn.readfile(doc .. ".notes"))
+  end)
+end)

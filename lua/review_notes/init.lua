@@ -359,6 +359,32 @@ end
 -- Text of the notes whose icon is on the cursor line, as virtual lines under
 -- it, with the lines a range covers highlighted. Only on the icon line: the
 -- bar lines of a range stay quiet, so text never appears ahead of its icon.
+-- Split *text* into pieces of at most *width* display cells, at spaces when
+-- possible. Virtual lines never wrap, so long notes are wrapped here, for
+-- display only.
+local function wrap(text, width)
+  if width < 10 or vim.fn.strdisplaywidth(text) <= width then return { text } end
+  local out, line = {}, ""
+  for word in text:gmatch("%S+%s*") do
+    if line ~= "" and vim.fn.strdisplaywidth(line .. word:gsub("%s+$", "")) > width then
+      table.insert(out, (line:gsub("%s+$", "")))
+      line = ""
+    end
+    -- A single word longer than the width is cut.
+    while vim.fn.strdisplaywidth(word) > width do
+      local cut = vim.fn.strcharpart(word, 0, width)
+      table.insert(out, cut)
+      word = word:sub(#cut + 1)
+    end
+    line = line .. word
+  end
+  if line:match("%S") then table.insert(out, (line:gsub("%s+$", ""))) end
+  -- Leading spaces (code indentation) are not words; keep them on the first piece.
+  local lead = text:match("^%s*")
+  if lead ~= "" and out[1] then out[1] = lead .. out[1] end
+  return out
+end
+
 local function show_cursor_notes()
   local buf = vim.api.nvim_get_current_buf()
   vim.api.nvim_buf_clear_namespace(buf, ns_cursor, 0, -1)
@@ -371,9 +397,13 @@ local function show_cursor_notes()
     local text_hl = n.e.resolved and "ReviewResolved" or "ReviewText"
     local indent = string.rep(" ", vim.fn.indent(n.end_row + 1))
     local lines = by_row[n.end_row] or {}
+    local info = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
+    local width = (info and (info.width - info.textoff) or 80) - #indent - 3
     for i, text in ipairs(vim.split(n.e.text, "\n", { plain = true })) do
-      local lead = i == 1 and (icon .. " ") or "  "
-      table.insert(lines, { { indent .. lead, hl }, { text, text_hl } })
+      for j, piece in ipairs(wrap(text, width)) do
+        local lead = (i == 1 and j == 1) and (icon .. " ") or "  "
+        table.insert(lines, { { indent .. lead, hl }, { piece, text_hl } })
+      end
     end
     by_row[n.end_row] = lines
     if n.end_row > n.row then

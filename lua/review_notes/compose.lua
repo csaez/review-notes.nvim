@@ -34,7 +34,7 @@ function M.open(opts)
   local src_win = vim.api.nvim_get_current_win()
   local win_width = vim.api.nvim_win_get_width(src_win)
   local text_width = win_width - (vim.fn.getwininfo(src_win)[1] or { textoff = 0 }).textoff
-  local indent = math.min(vim.fn.indent(opts.end_row + 1), math.max(0, text_width - 50))
+  local indent = math.floor(math.min(vim.fn.indent(opts.end_row + 1), math.max(0, text_width - 50)))
   local width = math.floor(math.max(20, math.min(90, text_width - indent - 2)))
   local height = 8
 
@@ -48,6 +48,11 @@ function M.open(opts)
   vim.bo[buf].swapfile = false
   pcall(vim.api.nvim_buf_set_name, buf, "review://" .. opts.key .. "#" .. buf)
   vim.bo[buf].filetype = "markdown"
+  -- Wrap on screen only: a global textwidth wider than the float would hard
+  -- break lines while typing, reflowing the text mid-sentence, and those
+  -- breaks would end up in the note (and in the comment sent to GitLab).
+  vim.bo[buf].textwidth = 0
+  vim.bo[buf].formatoptions = vim.bo[buf].formatoptions:gsub("[tca]", "")
 
   -- Below the code (and the thread shown under it); above it when that would
   -- run off the window, so the float never covers the line it is about.
