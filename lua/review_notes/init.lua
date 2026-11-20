@@ -171,7 +171,7 @@ local function context(buf, memo)
 end
 
 -- The review that remote commands act on: the current buffer's when it is a
--- branch review, else the cwd's repo (e.g. `:Review sync` from the plan).
+-- branch review, else the cwd's repo (e.g. `:Review sync` from a file outside git).
 ---@return review_notes.Context?
 local function remote_context()
   local ctx = context()
@@ -226,8 +226,8 @@ local function save(path, lines)
   end
 end
 
--- Path of *name* as written in the notes file: repo-relative, or absolute for
--- files outside the repo.
+-- Path of *name* as written in the notes file: relative to the review's root
+-- (the worktree, or the directory of a file outside git).
 local function note_path(name, root)
   if name:sub(1, #root + 1) == root .. "/" then return name:sub(#root + 2) end
   return name

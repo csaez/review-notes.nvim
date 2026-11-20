@@ -26,12 +26,13 @@
 -- Body lines lose exactly their two-space indent, so code keeps its own
 -- indentation, and blank lines between my lines are kept (paragraphs). A line
 -- of mine that starts with `>` is written as `\>` so it is not read as quoted.
--- Lines starting with `#` are ignored. Absolute paths are notes on files
--- outside the repo and are never sent.
+-- Lines starting with `#` are ignored. Paths are relative to the review's
+-- root; an absolute one (written by hand) is never sent: GitLab only takes
+-- repo paths.
 local M = {}
 
 local RESOLVED_MARK = "> (resolved)"
--- How pi asks under a note (coding-workflow.ts, /fixup).
+-- How pi asks under a note (review-notes.ts, /fixup).
 M.PI_QUESTION = "> @pi: QUESTION:"
 
 --- Line of a conversation view (thread_view, entry_view) for a resolved thread.
@@ -507,7 +508,7 @@ function M.plan(lines)
   local plan = { new = {}, replies = {}, states = {}, drafts = 0, summary = (M.summary(lines)) }
   for _, e in ipairs(M.parse(lines)) do
     if vim.startswith(e.path, "/") then
-      -- outside the repo
+      -- not a repo path: nothing GitLab could anchor it to
     elseif e.draft then
       if not e.resolved then plan.drafts = plan.drafts + 1 end
     elseif not e.id then
