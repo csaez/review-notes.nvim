@@ -44,7 +44,7 @@ local ns_cursor = vim.api.nvim_create_namespace("review_notes_cursor")
 local ns_signs = vim.api.nvim_create_namespace("review_notes_signs")
 
 -- Nerd Font icons: comment, comment-discussion, pencil (draft), bell (new),
--- question (pi asks me), upload (things a push would send).
+-- question (pi asks me), upload (things a push would send), check (resolved).
 ---@type table<string, { icon: string, hl: string }>
 M.style = {
   note = { icon = "\u{ea6b}", hl = "ReviewNote" },
@@ -53,6 +53,7 @@ M.style = {
   new = { icon = "\u{f0f3}", hl = "ReviewNew" },
   ask = { icon = "\u{f128}", hl = "ReviewAsk" },
   send = { icon = "\u{f093}", hl = "ReviewSend" },
+  resolved = { icon = "\u{f00c}", hl = "ReviewResolved" },
 }
 
 ---@class review_notes.Context
@@ -66,6 +67,11 @@ local to_send = {} ---@type table<string, integer>
 -- Entries waiting for me per notes file, to notify when that grows.
 local waiting = {} ---@type table<string, integer>
 local contexts = {} ---@type table<integer, review_notes.Context>
+-- Open entries per state, per notes file: the whole review, for the statusline.
+local counts = {} ---@type table<string, table<string, integer>>
+-- The review of the last reviewed buffer seen by `status()`, shown while the
+-- current buffer is not one (a picker, a terminal).
+local last_ctx ---@type review_notes.Context?
 
 local function count_to_send(lines)
   local plan = nf.plan(lines)
@@ -204,6 +210,14 @@ local function load(path)
 end
 
 local function save(path, lines)
+  -- A sibling `.notes` file with nothing left is removed, so reviewing
+  -- documents does not litter directories. Branch files live in .git.
+  if path:match("%.notes$") and not vim.iter(lines):any(function(l) return l:match("%S") end) then
+    local buf = notes_buf(path)
+    if buf then vim.api.nvim_buf_delete(buf, { force = true }) end
+    vim.fn.delete(path)
+    return
+  end
   vim.fn.mkdir(vim.fs.dirname(path), "p")
   vim.fn.writefile(lines, path)
   local buf = notes_buf(path)
@@ -252,7 +266,6 @@ local function wants_me(e) return e.my_turn or e.new end
 -- waiting for me stand out, drafts are marked.
 local function look(e)
   local s = state(e)
-  if s == "resolved" then return "\u{f00c}", "ReviewResolved" end
   return M.style[s].icon, M.style[s].hl
 end
 
@@ -359,30 +372,23 @@ end
 -- Text of the notes whose icon is on the cursor line, as virtual lines under
 -- it, with the lines a range covers highlighted. Only on the icon line: the
 -- bar lines of a range stay quiet, so text never appears ahead of its icon.
--- Split *text* into pieces of at most *width* display cells, at spaces when
--- possible. Virtual lines never wrap, so long notes are wrapped here, for
--- display only.
-local function wrap(text, width)
-  if width < 10 or vim.fn.strdisplaywidth(text) <= width then return { text } end
-  local out, line = {}, ""
-  for word in text:gmatch("%S+%s*") do
-    if line ~= "" and vim.fn.strdisplaywidth(line .. word:gsub("%s+$", "")) > width then
-      table.insert(out, (line:gsub("%s+$", "")))
-      line = ""
-    end
-    -- A single word longer than the width is cut.
-    while vim.fn.strdisplaywidth(word) > width do
-      local cut = vim.fn.strcharpart(word, 0, width)
-      table.insert(out, cut)
-      word = word:sub(#cut + 1)
-    end
-    line = line .. word
+-- Cut *text* to at most *width* display cells, ending in "..." when cut.
+local function truncate(text, width)
+  if vim.fn.strdisplaywidth(text) <= width then return text end
+  local n = vim.fn.strchars(text)
+  while n > 0 and vim.fn.strdisplaywidth(vim.fn.strcharpart(text, 0, n)) > width - 3 do n = n - 1 end
+  return vim.fn.strcharpart(text, 0, n) .. "..."
+end
+
+-- One line standing for an entry: the head (or pi's question, which is what
+-- waits for me) and how much more there is behind it.
+local function summary_line(e)
+  local text = e.head
+  local extra = #vim.split(e.text, "\n", { plain = true }) - 1
+  if e.my_turn and e.quoted[#e.quoted] then
+    text = e.quoted[#e.quoted]:gsub("^>%s?", "")
   end
-  if line:match("%S") then table.insert(out, (line:gsub("%s+$", ""))) end
-  -- Leading spaces (code indentation) are not words; keep them on the first piece.
-  local lead = text:match("^%s*")
-  if lead ~= "" and out[1] then out[1] = lead .. out[1] end
-  return out
+  return text, extra
 end
 
 local function show_cursor_notes()
@@ -399,12 +405,12 @@ local function show_cursor_notes()
     local lines = by_row[n.end_row] or {}
     local info = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
     local width = (info and (info.width - info.textoff) or 80) - #indent - 3
-    for i, text in ipairs(vim.split(n.e.text, "\n", { plain = true })) do
-      for j, piece in ipairs(wrap(text, width)) do
-        local lead = (i == 1 and j == 1) and (icon .. " ") or "  "
-        table.insert(lines, { { indent .. lead, hl }, { piece, text_hl } })
-      end
-    end
+    local text, extra = summary_line(n.e)
+    local more = extra > 0 and (" (+" .. extra .. ")") or ""
+    table.insert(lines, {
+      { indent .. icon .. " ", hl },
+      { truncate(text, width - #more) .. more, text_hl },
+    })
     by_row[n.end_row] = lines
     if n.end_row > n.row then
       vim.api.nvim_buf_set_extmark(buf, ns_cursor, n.row, 0, {
@@ -448,26 +454,36 @@ function M.jump(dir)
   show_cursor_notes()
 end
 
---- Statusline component for the current buffer: open entries per state, then
---- the number of things `:Review push` would send (for the whole review).
+--- Statusline component for the review of the current buffer: open entries
+--- per state across all its files, then the number of things `:Review push`
+--- would send. Outside git every file has its own notes, so it adds up the
+--- files opened. Reads cached counts only: safe to call on every redraw.
 function M.status()
-  local counts = {}
-  for _, e in ipairs(shown[vim.api.nvim_get_current_buf()] or {}) do
-    -- Resolved entries are done, unless pi resolved them and I have not looked.
-    local s = state(e)
-    if s ~= "resolved" then counts[s] = (counts[s] or 0) + 1 end
+  local ctx = contexts[vim.api.nvim_get_current_buf()]
+  if ctx then last_ctx = ctx end
+  ctx = ctx or last_ctx
+  if not ctx then return "" end
+  local total, send = {}, 0
+  if ctx.kind == "git" then
+    total, send = counts[ctx.path] or {}, to_send[ctx.path] or 0
+  else
+    local seen = {}
+    for buf, c in pairs(contexts) do
+      if c.kind == "file" and not seen[c.path] and vim.api.nvim_buf_is_loaded(buf) then
+        seen[c.path] = true
+        for kind, n in pairs(counts[c.path] or {}) do total[kind] = (total[kind] or 0) + n end
+      end
+    end
   end
   local parts = {}
   for _, kind in ipairs({ "ask", "new", "note", "thread", "draft" }) do
-    if counts[kind] then
+    if total[kind] then
       local style = M.style[kind]
-      table.insert(parts, "%#" .. style.hl .. "#" .. style.icon .. " " .. counts[kind])
+      table.insert(parts, "%#" .. style.hl .. "#" .. style.icon .. " " .. total[kind])
     end
   end
-  local ctx = contexts[vim.api.nvim_get_current_buf()]
-  local n = ctx and ctx.kind == "git" and to_send[ctx.path]
-  if n and n > 0 then
-    table.insert(parts, "%#" .. M.style.send.hl .. "#" .. M.style.send.icon .. " " .. n)
+  if send > 0 then
+    table.insert(parts, "%#" .. M.style.send.hl .. "#" .. M.style.send.icon .. " " .. send)
   end
   return table.concat(parts, " ")
 end
@@ -514,6 +530,13 @@ local function entries_of(ctx, cache)
     if ctx.kind == "git" then to_send[ctx.path] = count_to_send(lines) end
     cache[ctx.path] = nf.parse(lines)
     waiting[ctx.path] = #vim.tbl_filter(wants_me, cache[ctx.path])
+    local n = {}
+    for _, e in ipairs(cache[ctx.path]) do
+      -- Resolved entries are done, unless pi resolved them and I have not looked.
+      local st = state(e)
+      if st ~= "resolved" then n[st] = (n[st] or 0) + 1 end
+    end
+    counts[ctx.path] = n
     if M.config.watch then watch(ctx.path) end
   end
   return cache[ctx.path]
@@ -568,8 +591,11 @@ local function virt_lines_at(buf, row)
   return n
 end
 
+local resolve_at, pending_at -- defined below, used by the editor keys
+
 -- Open the editor on an entry with my latest turn (see notes.turn): the whole
--- note while nobody has answered, else my reply after the last quoted line.
+-- note while nobody has answered, else my reply after the last quoted line,
+-- with the conversation above it. Resolve and pending are keys of the editor.
 -- Sending reopens a resolved entry and clears [new]: I have acted on it.
 local function reply(ctx, e, n)
   local lines = load(ctx.path)
@@ -577,15 +603,46 @@ local function reply(ctx, e, n)
   local turn = idx and nf.turn(lines, idx)
   if not idx or not turn then return end
   local who = e.head:match("^@[%w._-]+")
-  local title = (turn.whole and "Edit note " or (#turn.text > 0 and "Edit reply " or "Reply "))
-    .. (who and ("to " .. who .. " ") or "")
-    .. "at " .. e.loc
-    .. (e.resolved and " (reopens)" or "")
+  local verb = turn.whole and "Edit note " or (#turn.text > 0 and "Edit reply " or "Reply ")
+  -- The entry as it is now: the actions change its tags under the float.
+  local function fresh()
+    local now = load(ctx.path)
+    local i = find_line(now, e, {})
+    return i and now or nil, i
+  end
+  local function title()
+    local now, i = fresh()
+    local cur = now and i and nf.parse(now)
+    local x
+    for _, c in ipairs(cur or {}) do
+      if c.src == i then x = c end
+    end
+    x = x or e
+    local tags = {}
+    if x.resolved then table.insert(tags, "resolved (sending reopens)") end
+    if x.draft then table.insert(tags, "pending") end
+    return verb .. (who and ("to " .. who .. " ") or "") .. "at " .. e.loc
+      .. (#tags > 0 and (" [" .. table.concat(tags, ", ") .. "]") or "")
+  end
+  local function act(fn)
+    return function()
+      local now, i = fresh()
+      local cur = now and i and nf.parse(now)
+      for _, c in ipairs(cur or {}) do
+        if c.src == i then return fn(ctx, now, i, c) end
+      end
+    end
+  end
   local buf = vim.api.nvim_get_current_buf()
   require("review_notes.compose").open({
     key = ctx.path .. "\0" .. (e.id or e.raw),
     title = title,
     initial = turn.text,
+    thread = nf.thread_view(lines, idx),
+    actions = {
+      { key = "<C-r>", desc = "resolve/reopen", run = act(resolve_at) },
+      { key = "<C-p>", desc = "pending", run = act(pending_at) },
+    },
     row = n.row,
     end_row = n.end_row,
     skip = virt_lines_at(buf, n.end_row),
@@ -653,14 +710,9 @@ local function entry_at_cursor(lines)
   return e, idx
 end
 
---- Resolve the note under the cursor, or reopen it when it is resolved. For
---- remote threads the change is sent by `:Review push`.
-function M.toggle_resolved()
-  local ctx = context()
-  if not ctx then return end
-  local lines = load(ctx.path)
-  local e, idx = entry_at_cursor(lines)
-  if not e or not idx then return end
+-- Resolve the entry at *idx*, or reopen it when it is resolved. For remote
+-- threads the change is sent by `:Review push`.
+resolve_at = function(ctx, lines, idx, e)
   -- Resolved by someone else (pi, the remote) and not seen yet: the first
   -- toggle accepts it as it is.
   local accept = e.resolved and e.new
@@ -673,24 +725,36 @@ function M.toggle_resolved()
   end))
   M.refresh()
   local what = accept and "accepted (stays resolved)" or e.resolved and "reopened" or "resolved"
-  vim.notify(("review: %s %s (<leader>rd again to %s)"):format(e.kind, what, accept and "reopen" or "undo"), vim.log.levels.INFO)
+  vim.notify(("review: %s %s"):format(e.kind, what), vim.log.levels.INFO)
 end
 
---- Toggle the note under the cursor between pending and approved. A pending
---- note carries the [draft] tag and is held back from push (the whole entry:
---- a thread's reply and resolve too); removing the tag approves it.
-function M.toggle_pending()
-  local ctx = context()
-  if not ctx then return end
-  local lines = load(ctx.path)
-  local e, idx = entry_at_cursor(lines)
-  if not e or not idx then return end
+-- A pending entry carries the [draft] tag and is held back from push (the
+-- whole entry: a thread's reply and resolve too); removing the tag approves it.
+pending_at = function(ctx, lines, idx, e)
   save(ctx.path, nf.edit_entry(lines, idx, function(x) x.draft = not x.draft end))
   M.refresh()
   vim.notify(
     ("review: %s %s"):format(e.kind, e.draft and "approved, will be sent" or "pending, held back from push"),
     vim.log.levels.INFO
   )
+end
+
+--- Resolve the note under the cursor, or reopen it when it is resolved.
+function M.toggle_resolved()
+  local ctx = context()
+  if not ctx then return end
+  local lines = load(ctx.path)
+  local e, idx = entry_at_cursor(lines)
+  if e and idx then resolve_at(ctx, lines, idx, e) end
+end
+
+--- Toggle the note under the cursor between pending and approved.
+function M.toggle_pending()
+  local ctx = context()
+  if not ctx then return end
+  local lines = load(ctx.path)
+  local e, idx = entry_at_cursor(lines)
+  if e and idx then pending_at(ctx, lines, idx, e) end
 end
 
 --- Open the notes file in a split (for editing, reordering, the summary).
@@ -796,6 +860,7 @@ end
 ---@field hl string highlight of the icon
 ---@field summary string first line of the note
 ---@field summary_hl string
+---@field thread string[] the whole conversation as markdown lines, for a preview
 ---@field note table the note, for `M.goto_item`
 
 --- All notes of the review as picker items, across files, resolved included:
@@ -824,6 +889,7 @@ function M.items(buf)
       icon = icon,
       hl = hl,
       summary = n.e.text:match("^[^\n]*"),
+      thread = nf.entry_view(n.e),
       summary_hl = n.e.resolved and "ReviewResolved" or "ReviewText",
       note = n,
     })
@@ -963,7 +1029,8 @@ function M.clean()
   local out, n = nf.clean(load(ctx.path))
   if n > 0 then save(ctx.path, out) end
   M.refresh()
-  notify(("removed %d resolved entries"):format(n))
+  notify(("removed %d resolved entries"):format(n)
+    .. ((ctx.kind == "file" and vim.fn.filereadable(ctx.path) == 0 and n > 0) and ", notes file deleted" or ""))
 end
 
 local commands = {

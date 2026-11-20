@@ -297,6 +297,61 @@ describe("compose", function()
   end)
 end)
 
+describe("thread float", function()
+  local repo, notes_path
+
+  before_each(function()
+    vim.cmd("silent! %bwipeout!")
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+    vim.fn.writefile({ "one", "two" }, repo .. "/a.c")
+    vim.cmd("cd " .. repo)
+    vim.cmd("edit a.c")
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
+      .. "/main.txt"
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({ "a.c:1: [id:t1] @al: why?", "  > @bo: because", "  > more" }, notes_path)
+    review.refresh()
+  end)
+
+  after_each(function()
+    vim.cmd("silent! %bwipeout!")
+    vim.fn.delete(repo, "rf")
+  end)
+
+  local function read() return vim.fn.readfile(notes_path) end
+  local function floats()
+    return vim.tbl_filter(function(w) return vim.api.nvim_win_get_config(w).relative ~= "" end, vim.api.nvim_list_wins())
+  end
+
+  it("shows the conversation read-only above the editor", function()
+    review.add()
+    local editor = vim.api.nvim_get_current_win()
+    assert.are.equal(2, #floats())
+    local thread = vim.tbl_filter(function(w) return w ~= editor end, floats())[1]
+    local tb = vim.api.nvim_win_get_buf(thread)
+    assert.is_false(vim.bo[tb].modifiable)
+    assert.are.same({ "### @al", "why?", "", "### @bo", "because", "more" }, vim.api.nvim_buf_get_lines(tb, 0, -1, false))
+    vim.cmd("close")
+    wait_for(function() return #floats() == 0 end, "the thread float to close")
+  end)
+
+  it("resolves and sets pending from the float, which stays open", function()
+    review.add()
+    local win = vim.api.nvim_get_current_win()
+    local function press(k) vim.api.nvim_feedkeys(vim.keycode(k), "x", false) end
+    press("<C-r>")
+    assert.is_truthy(read()[1]:find("[resolved]", 1, true))
+    assert.are.equal(win, vim.api.nvim_get_current_win())
+    press("<C-p>")
+    assert.is_truthy(read()[1]:find("[draft]", 1, true))
+    press("<C-r>")
+    assert.is_nil(read()[1]:find("[resolved]", 1, true))
+    assert.is_truthy(vim.api.nvim_win_get_config(win).title[1][1]:find("pending", 1, true))
+  end)
+end)
+
 describe("files outside git", function()
   local dir, repo, doc
 
@@ -335,6 +390,14 @@ describe("files outside git", function()
     local items = review.items()
     assert.are.equal(1, #items)
     assert.are.equal(doc, items[1].file)
+  end)
+
+  it("deletes the notes file once nothing is left in it", function()
+    vim.fn.writefile({ "doc.md:1: [resolved] done" }, doc .. ".notes")
+    vim.cmd("cd " .. dir)
+    vim.cmd("edit " .. doc)
+    review.clean()
+    assert.are.equal(0, vim.fn.filereadable(doc .. ".notes"))
   end)
 
   it("shows a git file and a file outside git side by side", function()
@@ -448,18 +511,16 @@ describe("long notes", function()
     vim.fn.delete(dir, "rf")
   end)
 
-  it("wraps the shown text to the window, for display only", function()
+  it("shows one line under the code, cut to the window", function()
     vim.api.nvim_win_set_cursor(0, { 1, 0 })
     vim.api.nvim_exec_autocmds("CursorMoved", {})
     local ns = vim.api.nvim_get_namespaces().review_notes_cursor
     local marks = vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })
     local virt = marks[1][4].virt_lines
-    assert.is_true(#virt > 2)
+    assert.are.equal(1, #virt)
     local width = vim.api.nvim_win_get_width(0)
-    for _, l in ipairs(virt) do
-      assert.is_true(vim.fn.strdisplaywidth(l[1][1] .. l[2][1]) <= width)
-    end
-    assert.are.equal("  indented code line", virt[#virt][2][1])
+    assert.is_true(vim.fn.strdisplaywidth(virt[1][1][1] .. virt[1][2][1]) <= width)
+    assert.is_truthy(virt[1][2][1]:find("(+1)", 1, true))
     -- The file keeps one logical line.
     assert.are.equal(2, #vim.fn.readfile(doc .. ".notes"))
   end)

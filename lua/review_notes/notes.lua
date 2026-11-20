@@ -34,6 +34,9 @@ local RESOLVED_MARK = "> (resolved)"
 -- How pi asks under a note (coding-workflow.ts, /fixup).
 M.PI_QUESTION = "> @pi: QUESTION:"
 
+--- Line of a conversation view (thread_view, entry_view) for a resolved thread.
+M.RESOLVED_VIEW = "> [!TIP] Resolved"
+
 --- Escape a line of my text so it is not read as a quoted (remote) line.
 ---@param line string
 ---@return string
@@ -309,6 +312,84 @@ function M.set_turn(lines, idx, text, fn)
   end
   local out = splice(lines, t.first, t.last, repl)
   if not t.whole then out[idx] = M.head_line(e) end
+  return out
+end
+
+--- The conversation of the entry at *idx* as markdown lines, for reading: the
+--- head and quoted comments, and my lines before my latest turn (see `turn`).
+--- Empty when there is nothing but my own turn.
+---@return string[]
+function M.thread_view(lines, idx)
+  local e, t = entry_at(lines, idx), M.turn(lines, idx)
+  if not e or not t then return {} end
+  local out = {}
+  local function author_line(who, text)
+    if #out > 0 then table.insert(out, "") end
+    table.insert(out, "### " .. who .. (text ~= "" and (" " .. text) or ""))
+  end
+  if t.whole then return out end
+  local who, rest = e.head:match("^(@[%w._-]+):%s*(.*)$")
+  if who then
+    author_line(who, "")
+    table.insert(out, rest)
+  else
+    table.insert(out, e.head)
+  end
+  for i = e.src + 1, t.first - 1 do
+    local l = dedent(lines[i])
+    if l == RESOLVED_MARK then
+      table.insert(out, "")
+      table.insert(out, M.RESOLVED_VIEW)
+    elseif l:sub(1, 1) == ">" then
+      l = l:gsub("^>%s?", "")
+      local w, r = l:match("^(@[%w._-]+):%s?(.*)$")
+      if w then
+        author_line(w, "")
+        table.insert(out, r)
+      else
+        table.insert(out, l)
+      end
+    else
+      table.insert(out, M.unescape(l))
+    end
+  end
+  return out
+end
+
+--- The whole conversation of *e* as markdown lines: head, remote comments and
+--- my lines, in file order.
+---@param e review_notes.Entry
+---@return string[]
+function M.entry_view(e)
+  local out = {}
+  local function author(who, rest)
+    if #out > 0 then table.insert(out, "") end
+    table.insert(out, "### " .. who)
+    table.insert(out, rest)
+  end
+  local who, rest = e.head:match("^(@[%w._-]+):%s*(.*)$")
+  if who then
+    author(who, rest)
+  else
+    table.insert(out, e.head)
+  end
+  local first = true
+  for _, raw in ipairs(e.body) do
+    if raw == RESOLVED_MARK then
+      vim.list_extend(out, { "", M.RESOLVED_VIEW })
+    elseif raw:sub(1, 1) == ">" then
+      local l = raw:gsub("^>%s?", "")
+      -- Some backends repeat the first comment, the head, as the first quote.
+      local dup = first and l == e.head
+      first = false
+      if dup then goto continue end
+      local w, r = l:match("^(@[%w._-]+):%s?(.*)$")
+      if w then author(w, r) else table.insert(out, l) end
+    else
+      table.insert(out, M.unescape(raw))
+    end
+    ::continue::
+  end
   return out
 end
 
