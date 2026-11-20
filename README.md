@@ -22,7 +22,7 @@ is `git-lab` (dotfiles `bin/git-lab`).
 - What waits for you stands out: `[new]` entries (even resolved ones, since
   pi resolving a note is a claim to check; the first resolve toggle accepts
   it) and notes ending with a pi question. `jump_new(1/-1)` goes through
-  them across the files of the review (`]R`/`[R` in the dotfiles); shown notes files are watched, so
+  them across the files of the review; shown notes files are watched, so
   changes made by pi or git-lab show up right away.
 - File format: see the header of `lua/review_notes/notes.lua`.
 - Backend contract: see `M.config` in `lua/review_notes/init.lua`.
