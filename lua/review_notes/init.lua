@@ -5,7 +5,8 @@
 -- own signs (deliberately not vim.diagnostic, so they never mix with LSP
 -- problems in ]d, pickers or counts), and synced with the remote through the
 -- configured backend commands (see M.config): pull brings the remote threads
--- in (remote wins), push sends my notes, replies and resolved state.
+-- in (remote wins), push pulls, then sends my notes, replies and resolved
+-- state, holding back what the pull flagged [new].
 --
 -- Line numbers in the file refer to the files as saved on disk. While a buffer
 -- is edited, each note follows its code through an extmark; on save the new
@@ -18,40 +19,49 @@ local M = {}
 ---@class review_notes.Config
 ---@field watch boolean refresh when a shown notes file changes on disk
 ---@field backend table<string, string[]> Command lines, run in the repo root.
----  `{path}`, `{line}` and `{thread}` are substituted; text goes on stdin.
+---  `{path}`, `{line}`, `{thread}` and `{ids}` are substituted; text goes on stdin.
 ---    threads    prints [{id, path, line, resolved, comments = [{author, body}]}]
+---    threads lists general threads (on the whole change) with path = null;
+---               line (and start_line, multi-line) are lines of the files on disk.
+---               Optional: comments[].mine (my own, so they never flag a
+---               thread) and resolved_by, resolved_by_me (a resolve by
+---               someone else flags the thread)
 ---    add        starts a thread at {path}:{line}, text on stdin
+---    general    starts a thread on the whole change, text on stdin
 ---    reply      replies to {thread}, text on stdin
+---               add, general, reply print {id} (with submit: the queued draft)
 ---    resolve, unresolve  change the state of {thread}
----    submit     optional: publishes what add/reply queued; the summary is on stdin
----    discard    optional: drops what add/reply queued (used if submit fails)
+---    submit     optional: publishes what add/general/reply queued: {ids}, the
+---               comma-separated ids they printed, so drafts queued elsewhere
+---               (a review started in the browser) stay pending; may print
+---               {published = [ids]}, also when it fails part way
+---    discard    optional: drops the queued {ids} that submit did not publish
 M.config = {
   -- Watch the notes files shown, to follow changes made by pi or git-lab.
   watch = true,
   backend = {
     threads = { "git-lab", "comment", "list", "--json" },
-    add = { "git-lab", "comment", "add", "--draft", "{path}:{line}", "-" },
-    reply = { "git-lab", "comment", "reply", "--draft", "{thread}", "-" },
+    add = { "git-lab", "comment", "add", "--draft", "--json", "{path}:{line}", "-" },
+    reply = { "git-lab", "comment", "reply", "--draft", "--json", "{thread}", "-" },
     resolve = { "git-lab", "comment", "resolve", "{thread}" },
     unresolve = { "git-lab", "comment", "unresolve", "{thread}" },
-    submit = { "git-lab", "review", "submit", "-m", "-" },
-    discard = { "git-lab", "review", "discard" },
+    general = { "git-lab", "comment", "add", "--draft", "--json", "-" },
+    submit = { "git-lab", "review", "submit", "--only", "{ids}", "--json" },
+    discard = { "git-lab", "review", "discard", "--only", "{ids}" },
   },
 }
 
 local ns = vim.api.nvim_create_namespace("review_notes")
-local ns_cursor = vim.api.nvim_create_namespace("review_notes_cursor")
 local ns_signs = vim.api.nvim_create_namespace("review_notes_signs")
 
 -- Nerd Font icons: comment, comment-discussion, pencil (draft), bell (new),
--- question (pi asks me), upload (things a push would send), check (resolved).
+-- upload (things a push would send), check (resolved).
 ---@type table<string, { icon: string, hl: string }>
 M.style = {
   note = { icon = "\u{ea6b}", hl = "ReviewNote" },
   thread = { icon = "\u{eac7}", hl = "ReviewThread" },
   draft = { icon = "\u{ea73}", hl = "ReviewDraft" },
   new = { icon = "\u{f0f3}", hl = "ReviewNew" },
-  ask = { icon = "\u{f128}", hl = "ReviewAsk" },
   send = { icon = "\u{f093}", hl = "ReviewSend" },
   resolved = { icon = "\u{f00c}", hl = "ReviewResolved" },
 }
@@ -75,7 +85,7 @@ local last_ctx ---@type review_notes.Context?
 
 local function count_to_send(lines)
   local plan = nf.plan(lines)
-  return #plan.new + #plan.replies + #plan.states + (plan.summary ~= "" and 1 or 0)
+  return #plan.new + #plan.replies + #plan.states
 end
 
 -- Entries shown per buffer, each with the id of the extmark that tracks it.
@@ -97,11 +107,9 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "ReviewThread", { default = true, link = "String" })
   vim.api.nvim_set_hl(0, "ReviewDraft", { default = true, link = "Constant" })
   vim.api.nvim_set_hl(0, "ReviewText", { default = true, link = "Comment" })
-  vim.api.nvim_set_hl(0, "ReviewRange", { default = true, link = "CursorLine" })
   vim.api.nvim_set_hl(0, "ReviewResolved", { default = true, link = "NonText" })
   vim.api.nvim_set_hl(0, "ReviewNew", { default = true, link = "DiagnosticWarn" })
   vim.api.nvim_set_hl(0, "ReviewSend", { default = true, link = "DiagnosticInfo" })
-  vim.api.nvim_set_hl(0, "ReviewAsk", { default = true, link = "DiagnosticHint" })
 end
 
 local function notify(msg, level)
@@ -249,18 +257,17 @@ local function live_notes(buf)
   return result
 end
 
--- What an entry needs from me, most urgent first: a question to answer,
--- something someone else changed (new, even if resolved: pi resolving a note
--- is a claim to check), a draft to approve, else just its kind.
+-- What an entry needs from me, most urgent first: something someone else
+-- changed (new, even if resolved: pi resolving a note is a claim to check),
+-- a draft to approve, else just its kind.
 local function state(e)
-  if e.my_turn then return "ask" end
   if e.new then return "new" end
   if e.resolved then return "resolved" end
   return e.draft and "draft" or e.kind
 end
 
--- Needs my attention: answered by pi, changed by someone else.
-local function wants_me(e) return e.my_turn or e.new end
+-- Needs my attention: changed by someone else, whoever that is.
+local function wants_me(e) return e.new end
 
 -- Icon and highlight for an entry: resolved entries are dimmed, the ones
 -- waiting for me stand out, drafts are marked.
@@ -275,8 +282,8 @@ local function draw_signs(buf)
   vim.api.nvim_buf_clear_namespace(buf, ns_signs, 0, -1)
   for _, n in ipairs(live_notes(buf)) do
     local icon, hl = look(n.e)
-    -- A range reads like GitLab: a bar down the lines, the icon (and the
-    -- text, see show_cursor_notes) on the last one. The sign yields to
+    -- A range reads like GitLab: a bar down the lines, the icon on the
+    -- last one. The sign yields to
     -- diagnostics (priority 10) so problems keep the gutter; the coloured
     -- line number keeps the note visible on those lines.
     for row = n.row, n.end_row do
@@ -314,7 +321,8 @@ local function refresh_buffer(buf, entries, ctx)
       if live[e.loc] then
         first, stop = live[e.loc][1], live[e.loc][2]
       else
-        first = math.min(e.line, last) - 1
+        -- Line 0 (the whole file) shows on the first line.
+        first = math.max(1, math.min(e.line, last)) - 1
         stop = math.max(first, math.min(e.end_line or e.line, last) - 1)
       end
       -- Both ends move down when a line is inserted at them, so the note
@@ -339,6 +347,13 @@ end
 -- still there, else the first line with the same location (the file may have
 -- been edited since it was shown).
 local function find_line(lines, e, used)
+  if e.general then
+    -- No location to go by: the head line as read.
+    for i, line in ipairs(lines) do
+      if line == e.raw and not used[i] then return i end
+    end
+    return nil
+  end
   local prefix = e.loc .. ":"
   if lines[e.src] and vim.startswith(lines[e.src], prefix) and not used[e.src] then
     return e.src
@@ -355,7 +370,8 @@ local function sync(buf, ctx)
   local used, changed = {}, false
   for _, e in ipairs(shown[buf]) do
     local r, er = rows(buf, e)
-    local idx = r and find_line(lines, e, used)
+    -- A note on the whole file stays at line 0 wherever its sign moves.
+    local idx = r and e.line > 0 and find_line(lines, e, used)
     if idx then
       used[idx] = true
       local loc = e.path .. ":" .. (r + 1) .. (er > r and ("-" .. (er + 1)) or "")
@@ -367,62 +383,6 @@ local function sync(buf, ctx)
   end
   -- Position updates are bookkeeping, not an edit to undo.
   if changed then save(ctx.path, lines) end
-end
-
--- Text of the notes whose icon is on the cursor line, as virtual lines under
--- it, with the lines a range covers highlighted. Only on the icon line: the
--- bar lines of a range stay quiet, so text never appears ahead of its icon.
--- Cut *text* to at most *width* display cells, ending in "..." when cut.
-local function truncate(text, width)
-  if vim.fn.strdisplaywidth(text) <= width then return text end
-  local n = vim.fn.strchars(text)
-  while n > 0 and vim.fn.strdisplaywidth(vim.fn.strcharpart(text, 0, n)) > width - 3 do n = n - 1 end
-  return vim.fn.strcharpart(text, 0, n) .. "..."
-end
-
--- One line standing for an entry: the head (or pi's question, which is what
--- waits for me) and how much more there is behind it.
-local function summary_line(e)
-  local text = e.head
-  local extra = #vim.split(e.text, "\n", { plain = true }) - 1
-  if e.my_turn and e.quoted[#e.quoted] then
-    text = e.quoted[#e.quoted]:gsub("^>%s?", "")
-  end
-  return text, extra
-end
-
-local function show_cursor_notes()
-  local buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_buf_clear_namespace(buf, ns_cursor, 0, -1)
-  if not shown[buf] or vim.fn.mode() ~= "n" then return end
-  local row = vim.fn.line(".") - 1
-  local here = vim.tbl_filter(function(n) return n.end_row == row end, live_notes(buf))
-  local by_row = {} ---@type table<integer, table[]>
-  for _, n in ipairs(here) do
-    local icon, hl = look(n.e)
-    local text_hl = n.e.resolved and "ReviewResolved" or "ReviewText"
-    local indent = string.rep(" ", vim.fn.indent(n.end_row + 1))
-    local lines = by_row[n.end_row] or {}
-    local info = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
-    local width = (info and (info.width - info.textoff) or 80) - #indent - 3
-    local text, extra = summary_line(n.e)
-    local more = extra > 0 and (" (+" .. extra .. ")") or ""
-    table.insert(lines, {
-      { indent .. icon .. " ", hl },
-      { truncate(text, width - #more) .. more, text_hl },
-    })
-    by_row[n.end_row] = lines
-    if n.end_row > n.row then
-      vim.api.nvim_buf_set_extmark(buf, ns_cursor, n.row, 0, {
-        end_row = n.end_row + 1,
-        hl_group = "ReviewRange",
-        hl_eol = true,
-      })
-    end
-  end
-  for row, lines in pairs(by_row) do
-    vim.api.nvim_buf_set_extmark(buf, ns_cursor, row, 0, { virt_lines = lines })
-  end
 end
 
 --- Jump to the next (dir = 1) or previous (dir = -1) note in the buffer,
@@ -451,7 +411,6 @@ function M.jump(dir)
     target = target or notes[#notes]
   end
   vim.api.nvim_win_set_cursor(0, { target.end_row + 1, 0 })
-  show_cursor_notes()
 end
 
 --- Statusline component for the review of the current buffer: open entries
@@ -476,7 +435,7 @@ function M.status()
     end
   end
   local parts = {}
-  for _, kind in ipairs({ "ask", "new", "note", "thread", "draft" }) do
+  for _, kind in ipairs({ "new", "note", "thread", "draft" }) do
     if total[kind] then
       local style = M.style[kind]
       table.insert(parts, "%#" .. style.hl .. "#" .. style.icon .. " " .. total[kind])
@@ -553,6 +512,8 @@ local function refresh_one(buf, memo, cache)
   end
 end
 
+local refresh_note -- the note float, defined with it below
+
 --- Re-read the notes files and update the signs in all loaded buffers, each
 --- from its own review (a branch's, or a file's sibling notes).
 function M.refresh()
@@ -560,7 +521,7 @@ function M.refresh()
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     if is_reviewed(buf) then refresh_one(buf, memo, cache) end
   end
-  show_cursor_notes()
+  refresh_note()
   vim.cmd.redrawstatus({ bang = true })
 end
 
@@ -582,85 +543,236 @@ local function entry_on_cursor_row()
   return here[1] and here[1].e
 end
 
--- Virtual lines (a shown thread) under *row*, so the editor opens below them.
-local function virt_lines_at(buf, row)
-  local n = 0
-  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns_cursor, { row, 0 }, { row, -1 }, { details = true })) do
-    n = n + #((m[4] or {}).virt_lines or {})
-  end
-  return n
+local resolve_at, pending_at, read_at -- defined below, used by the note keys
+local open_note, all_notes, goto_note
+
+--- Keys inside the note float (buffer-local, normal mode).
+M.keys = {
+  resolve = "<localleader>x",
+  draft = "<localleader>p",
+  read = "<localleader>r",
+  delete = "<localleader>d",
+  next = "]n",
+  prev = "[n",
+  code = "gd",
+}
+
+-- The code window a note float was opened from: navigation moves it along.
+local origin ---@type integer?
+-- Open note buffers by entry, and what each one shows.
+local note_bufs = {} ---@type table<string, integer>
+---@class review_notes.OpenNote
+---@field ctx review_notes.Context
+---@field ref { loc: string, id: string?, head: string?, fresh: boolean? }
+---@field key string
+local open_by_buf = {} ---@type table<integer, review_notes.OpenNote>
+
+-- Where an entry lives across rewrites of the notes file: a thread by id, a
+-- note by path and head (its line moves with the code).
+local function ref_of(e) return { loc = e.loc, id = e.id, head = e.head } end
+
+local function is_ref(e, ref)
+  if ref.fresh then return false end
+  if ref.id then return e.id == ref.id end
+  if e.id or e.head ~= ref.head then return false end
+  if not ref.loc then return e.general end
+  return e.path == ref.loc:match("^(.*):[%d-]+$")
 end
 
-local resolve_at, pending_at -- defined below, used by the editor keys
+-- The entry *ref* in *lines*; among notes with the same text, the one still
+-- at the same location.
+local function find_ref(lines, ref)
+  local found
+  for _, e in ipairs(nf.parse(lines)) do
+    if is_ref(e, ref) then
+      if ref.id or e.loc == ref.loc then return e end
+      found = found or e
+    end
+  end
+  return found
+end
 
--- Open the editor on an entry with my latest turn (see notes.turn): the whole
--- note while nobody has answered, else my reply after the last quoted line,
--- with the conversation above it. Resolve and pending are keys of the editor.
--- Sending reopens a resolved entry and clears [new]: I have acted on it.
-local function reply(ctx, e, n)
-  local lines = load(ctx.path)
-  local idx = find_line(lines, e, {})
-  local turn = idx and nf.turn(lines, idx)
-  if not idx or not turn then return end
+local function ref_key(ctx, ref)
+  local loc = ref.loc or ""
+  return ctx.path .. "\0" .. (ref.fresh and ("new\0" .. loc) or ref.id or (loc .. "\0" .. (ref.head or "")))
+end
+
+-- The conversation and my latest turn of *e* (see notes.turn).
+local function views(lines, e)
+  local t = nf.turn(lines, e.src)
+  return nf.thread_view(lines, e.src), t and t.text or {}
+end
+
+local function where(loc)
+  if not loc then return "whole change" end
+  if loc:match(":0$") then return loc:sub(1, -3) .. " (whole file)" end
+  return loc
+end
+
+local function note_title(e, ref)
+  if not e then return (ref.fresh and "New note on " or "Gone: ") .. where(ref.loc) end
+  local tags = {}
+  for _, t in ipairs({ "new", "draft", "resolved" }) do
+    if e[t] then table.insert(tags, t) end
+  end
   local who = e.head:match("^@[%w._-]+")
-  local verb = turn.whole and "Edit note " or (#turn.text > 0 and "Edit reply " or "Reply ")
-  -- The entry as it is now: the actions change its tags under the float.
-  local function fresh()
+  return where(e.loc) .. (who and ("  " .. who) or "") .. (#tags > 0 and ("  [" .. table.concat(tags, ", ") .. "]") or "")
+end
+
+-- Save my turn from the float. A new note becomes an entry; on a note it
+-- replaces my latest text, which reopens it and clears [new]: I have acted.
+local function write_note(cur, text, buf)
+  local ctx = cur.ctx
+  if cur.ref.fresh then
+    if #text == 0 then
+      notify("empty note, nothing saved")
+      return false
+    end
+    save(ctx.path, nf.add_entry(load(ctx.path), nf.new_entry_lines(cur.ref.loc, text), not cur.ref.loc))
+    cur.ref = { loc = cur.ref.loc, head = text[1] }
+  else
     local now = load(ctx.path)
-    local i = find_line(now, e, {})
-    return i and now or nil, i
-  end
-  local function title()
-    local now, i = fresh()
-    local cur = now and i and nf.parse(now)
-    local x
-    for _, c in ipairs(cur or {}) do
-      if c.src == i then x = c end
+    local e = find_ref(now, cur.ref)
+    if not e then
+      notify("the note is gone from the notes file, nothing saved", vim.log.levels.WARN)
+      return false
     end
-    x = x or e
-    local tags = {}
-    if x.resolved then table.insert(tags, "resolved (sending reopens)") end
-    if x.draft then table.insert(tags, "pending") end
-    return verb .. (who and ("to " .. who .. " ") or "") .. "at " .. e.loc
-      .. (#tags > 0 and (" [" .. table.concat(tags, ", ") .. "]") or "")
-  end
-  local function act(fn)
-    return function()
-      local now, i = fresh()
-      local cur = now and i and nf.parse(now)
-      for _, c in ipairs(cur or {}) do
-        if c.src == i then return fn(ctx, now, i, c) end
-      end
+    local t = nf.turn(now, e.src)
+    if t and t.whole and #text == 0 then
+      notify("empty note, nothing saved (" .. M.keys.delete .. " deletes it)")
+      return false
     end
+    save(ctx.path, nf.set_turn(now, e.src, text, #text > 0 and function(x)
+      x.resolved, x.new = false, false
+    end or nil))
+    if t and t.whole then cur.ref.head = text[1] end
   end
-  local buf = vim.api.nvim_get_current_buf()
-  require("review_notes.compose").open({
-    key = ctx.path .. "\0" .. (e.id or e.raw),
-    title = title,
-    initial = turn.text,
-    thread = nf.thread_view(lines, idx),
-    actions = {
-      { key = "<C-r>", desc = "resolve/reopen", run = act(resolve_at) },
-      { key = "<C-p>", desc = "pending", run = act(pending_at) },
+  local key = ref_key(ctx, cur.ref)
+  if key ~= cur.key then
+    if note_bufs[cur.key] == buf then note_bufs[cur.key] = nil end
+    cur.key, note_bufs[key] = key, buf
+  end
+  vim.bo[buf].modified = false
+  M.refresh()
+  return true
+end
+
+-- Run *fn* on the entry the float shows, as it is in the file now.
+local function on_entry(cur, fn)
+  if cur.ref.fresh then return notify("save the note first (:w)") end
+  local now = load(cur.ctx.path)
+  local e = find_ref(now, cur.ref)
+  if not e then return notify("the note is gone from the notes file", vim.log.levels.WARN) end
+  fn(cur.ctx, now, e.src, e)
+end
+
+local function close_note(buf)
+  require("review_notes.note").close()
+  if vim.api.nvim_buf_is_valid(buf) then vim.api.nvim_buf_delete(buf, { force = true }) end
+end
+
+-- The next (dir 1) or previous note of the review after the one shown, its
+-- code shown in the window the float came from.
+local function step(cur, dir)
+  local list = all_notes(cur.ctx)
+  if #list == 0 then return end
+  local at
+  for i, n in ipairs(list) do
+    if is_ref(n.e, cur.ref) then at = i end
+  end
+  local n = list[at and ((at - 1 + dir) % #list) + 1 or (dir > 0 and 1 or #list)]
+  if not n.dir and origin and vim.api.nvim_win_is_valid(origin) then
+    vim.api.nvim_win_call(origin, function() goto_note(n) end)
+  end
+  open_note(n.ctx, ref_of(n.e))
+end
+
+local function note_actions(cur)
+  return {
+    { key = M.keys.resolve, desc = "resolve", run = function() on_entry(cur, resolve_at) end },
+    { key = M.keys.draft, desc = "draft", run = function() on_entry(cur, pending_at) end },
+    { key = M.keys.read, desc = "read", run = function() on_entry(cur, read_at) end },
+    {
+      key = M.keys.delete,
+      desc = "delete",
+      run = function(buf)
+        if cur.ref.fresh then return close_note(buf) end
+        on_entry(cur, function(ctx, lines, idx, e)
+          if e.id then return notify("a remote thread cannot be deleted: resolve it") end
+          save(ctx.path, nf.delete_entry(lines, idx))
+          close_note(buf)
+          M.refresh()
+          notify("note deleted")
+        end)
+      end,
     },
-    row = n.row,
-    end_row = n.end_row,
-    skip = virt_lines_at(buf, n.end_row),
-    on_submit = function(text)
-      local now = load(ctx.path)
-      local i = find_line(now, e, {})
-      if not i then return notify("the note moved in the notes file, nothing saved", vim.log.levels.WARN) end
-      save(ctx.path, nf.set_turn(now, i, text, function(x)
-        x.resolved, x.new = false, false
-      end))
-      M.refresh()
+    { key = M.keys.next, desc = "next", run = function() step(cur, 1) end },
+    { key = M.keys.prev, desc = "prev", run = function() step(cur, -1) end },
+    {
+      key = M.keys.code,
+      desc = "code",
+      run = function()
+        local list = all_notes(cur.ctx)
+        require("review_notes.note").close()
+        if origin and vim.api.nvim_win_is_valid(origin) then vim.api.nvim_set_current_win(origin) end
+        for _, n in ipairs(list) do
+          if is_ref(n.e, cur.ref) then return goto_note(n) end
+        end
+      end,
+    },
+  }
+end
+
+-- Show the note *ref* of *ctx* in the float: an entry of the notes file, or
+-- with `ref.fresh` a new note at `ref.loc`.
+open_note = function(ctx, ref)
+  local lines = load(ctx.path)
+  local e = find_ref(lines, ref)
+  if not ref.fresh and not e then return notify("the note is gone from the notes file", vim.log.levels.WARN) end
+  local cur = { ctx = ctx, ref = ref, key = ref_key(ctx, ref) }
+  local conversation, reply_lines = {}, {}
+  if e then conversation, reply_lines = views(lines, e) end
+  local buf = note_bufs[cur.key]
+  if buf and open_by_buf[buf] then cur = open_by_buf[buf] end
+  buf = require("review_notes.note").show({
+    buf = buf,
+    name = (e and e.loc or ref.loc or "general"),
+    title = function() return note_title(find_ref(read_lines(cur.ctx.path), cur.ref), cur.ref) end,
+    conversation = conversation,
+    reply = reply_lines,
+    insert = ref.fresh,
+    actions = note_actions(cur),
+    on_write = function(text, b) return write_note(cur, text, b) end,
+    on_wipe = function(b)
+      if note_bufs[cur.key] == b then note_bufs[cur.key] = nil end
+      open_by_buf[b] = nil
     end,
   })
+  note_bufs[cur.key], open_by_buf[buf] = buf, cur
 end
 
---- Add a note for the cursor line, or the visual selection when called from
---- visual mode, in a small editor under the code. On a line that already has
---- a note (normal mode), reply to it or edit my latest text instead.
+-- Follow the notes file in the float (pi, a pull, an action).
+refresh_note = function()
+  local note = require("review_notes.note")
+  local buf = note.current()
+  local cur = buf and open_by_buf[buf]
+  if not cur then return end
+  local lines = read_lines(cur.ctx.path)
+  local e = find_ref(lines, cur.ref)
+  if e then
+    note.update(buf, views(lines, e))
+  else
+    note.retitle(buf)
+  end
+end
+
+local function remember_origin()
+  local win = vim.api.nvim_get_current_win()
+  if vim.api.nvim_win_get_config(win).relative == "" then origin = win end
+end
+
+--- Open the note on the cursor line in the note float, or start a new one on
+--- the line (or the visual selection, from visual mode).
 function M.add()
   local ctx = context()
   if not ctx or not is_reviewed(vim.api.nvim_get_current_buf()) then
@@ -668,15 +780,16 @@ function M.add()
     return
   end
   local buf = vim.api.nvim_get_current_buf()
+  remember_origin()
   local first, last = vim.fn.line("."), vim.fn.line(".")
   local mode = vim.fn.mode()
   if mode == "n" then
     local row = first - 1
     local here = notes_on_row(buf, row)
     for _, n in ipairs(here) do
-      if n.end_row == row then return reply(ctx, n.e, n) end
+      if n.end_row == row then return open_note(ctx, ref_of(n.e)) end
     end
-    if here[1] then return reply(ctx, here[1].e, here[1]) end
+    if here[1] then return open_note(ctx, ref_of(here[1].e)) end
   end
   if mode == "v" or mode == "V" or mode == "\22" then
     first, last = vim.fn.line("v"), vim.fn.line(".")
@@ -684,18 +797,7 @@ function M.add()
     vim.api.nvim_feedkeys(vim.keycode("<esc>"), "nx", false)
   end
   local rel = note_path(vim.api.nvim_buf_get_name(0), ctx.root)
-  local loc = rel .. ":" .. first .. (last ~= first and ("-" .. last) or "")
-  require("review_notes.compose").open({
-    key = ctx.path .. "\0" .. loc,
-    title = "Note at " .. loc,
-    row = first - 1,
-    end_row = last - 1,
-    skip = virt_lines_at(buf, last - 1),
-    on_submit = function(text)
-      append(ctx.path, nf.new_entry_lines(loc, text))
-      M.refresh()
-    end,
-  })
+  open_note(ctx, { loc = rel .. ":" .. first .. (last ~= first and ("-" .. last) or ""), fresh = true })
 end
 
 -- The note under the cursor and the index of its line in the notes file.
@@ -739,6 +841,14 @@ pending_at = function(ctx, lines, idx, e)
   )
 end
 
+-- Clear [new] without replying or resolving: read, nothing to say.
+read_at = function(ctx, lines, idx, e)
+  if not e.new then return notify(e.kind .. " is not new") end
+  save(ctx.path, nf.edit_entry(lines, idx, function(x) x.new = false end))
+  M.refresh()
+  vim.notify(("review: %s marked as read"):format(e.kind), vim.log.levels.INFO)
+end
+
 --- Resolve the note under the cursor, or reopen it when it is resolved.
 function M.toggle_resolved()
   local ctx = context()
@@ -757,13 +867,10 @@ function M.toggle_pending()
   if e and idx then pending_at(ctx, lines, idx, e) end
 end
 
---- Open the notes file in a split (for editing, reordering, the summary).
-function M.open()
-  local ctx = context()
-  if not ctx then
-    vim.notify("review: no review here (not a file, not in a git repository)", vim.log.levels.WARN)
-    return
-  end
+-- Show *ctx*'s notes file in a split, or go to its window when it is shown.
+local function open_notes(ctx)
+  local win = vim.fn.bufwinid(ctx.path)
+  if win ~= -1 then return vim.api.nvim_set_current_win(win) end
   vim.fn.mkdir(vim.fs.dirname(ctx.path), "p")
   vim.cmd("split " .. vim.fn.fnameescape(ctx.path))
   vim.bo.filetype = "reviewnotes"
@@ -771,10 +878,41 @@ function M.open()
   vim.cmd("lcd " .. vim.fn.fnameescape(ctx.root))
 end
 
+--- Open the notes file in a split (for editing by hand).
+function M.open()
+  local ctx = context()
+  if not ctx then
+    vim.notify("review: no review here (not a file, not in a git repository)", vim.log.levels.WARN)
+    return
+  end
+  open_notes(ctx)
+end
+
+--- Start a note on the whole change (a general note, a GitLab overview
+--- thread), or with *file* on the whole current file (`path:0`), in the note
+--- float.
+---@param file boolean?
+function M.add_general(file)
+  local ctx = context()
+  if not ctx then
+    vim.notify("review: no review here (not a file, not in a git repository)", vim.log.levels.WARN)
+    return
+  end
+  local buf = vim.api.nvim_get_current_buf()
+  if file and not is_reviewed(buf) then
+    vim.notify("review: not a file", vim.log.levels.WARN)
+    return
+  end
+  remember_origin()
+  open_note(ctx, { loc = file and (note_path(vim.api.nvim_buf_get_name(buf), ctx.root) .. ":0") or nil, fresh = true })
+end
+
 -- All notes of the review in file order, with 1-based lines: live positions for
--- open buffers (unsaved edits included), the notes file for the rest.
----@return { e: review_notes.Entry, file: string, line: integer, end_line: integer }[]
-local function all_notes(ctx)
+-- open buffers (unsaved edits included), the notes file for the rest. General
+-- notes come first; `dir` marks the ones without code (general, on a
+-- directory such as a submodule), which only live in the notes file.
+---@return { e: review_notes.Entry, file: string, line: integer, end_line: integer, dir: boolean, ctx: review_notes.Context }[]
+all_notes = function(ctx)
   local live = {} ---@type table<string, table>
   for buf, _ in pairs(shown) do
     -- Only buffers of this review: src indices of other notes files collide.
@@ -786,48 +924,66 @@ local function all_notes(ctx)
   end
   local result = {}
   for _, e in ipairs(nf.parse(read_lines(ctx.path))) do
-    local n = live[e.path .. "\0" .. e.src]
-    table.insert(result, {
-      e = e,
-      file = full_path(e.path, ctx.root),
-      line = n and n.row + 1 or e.line,
-      end_line = n and n.end_row + 1 or (e.end_line or e.line),
-    })
+    if e.general then
+      -- Its place is the notes file (a picker previews it there).
+      table.insert(result, { e = e, file = ctx.path, line = e.src, end_line = e.src, dir = true, ctx = ctx })
+    else
+      local n = live[e.path .. "\0" .. e.src]
+      local file = full_path(e.path, ctx.root)
+      table.insert(result, {
+        e = e,
+        file = file,
+        line = n and n.row + 1 or e.line,
+        end_line = n and n.end_row + 1 or (e.end_line or e.line),
+        dir = vim.fn.isdirectory(file) == 1,
+        ctx = ctx,
+      })
+    end
   end
   table.sort(result, function(a, b)
+    if a.e.general ~= b.e.general then return a.e.general end
     if a.file ~= b.file then return a.file < b.file end
     return a.end_line < b.end_line
   end)
   return result
 end
 
--- Open *n* (from all_notes) at its icon line and show its text.
-local function goto_note(n)
+-- Open *n* (from all_notes) at its icon line; a note on a
+-- directory has no code, so it opens at its entry in the notes file.
+goto_note = function(n)
+  if n.dir then
+    open_notes(n.ctx)
+    local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+    local idx = find_line(lines, n.e, {})
+    if idx then vim.api.nvim_win_set_cursor(0, { idx, 0 }) end
+    return
+  end
   if vim.api.nvim_buf_get_name(0) ~= n.file then
     vim.cmd("edit " .. vim.fn.fnameescape(n.file))
   end
-  vim.api.nvim_win_set_cursor(0, { math.min(n.end_line, vim.api.nvim_buf_line_count(0)), 0 })
+  vim.api.nvim_win_set_cursor(0, { math.max(1, math.min(n.end_line, vim.api.nvim_buf_line_count(0))), 0 })
   vim.cmd("normal! zz")
-  show_cursor_notes()
 end
 
---- Jump to the next (dir = 1) or previous (dir = -1) note waiting for me (a
---- pi question, or [new]: changed by pi or the remote) across the files of
+--- Jump to the next (dir = 1) or previous (dir = -1) [new] note (changed by
+--- someone else: pi, the remote) across the files of
 --- the review, wrapping around: the way through a round of answers.
 function M.jump_new(dir)
   local ctx = context()
   if not ctx then return end
   local list = vim.tbl_filter(function(n) return wants_me(n.e) end, all_notes(ctx))
   if #list == 0 then return notify("nothing new in this review") end
+  -- The cursor's place in the order of all_notes: in the notes file, among
+  -- the general notes; in a file, by path and line.
   local here = { file = vim.api.nvim_buf_get_name(0), line = vim.fn.line(".") }
-  local function after(n)
-    if n.file ~= here.file then return n.file > here.file end
-    return n.end_line > here.line
+  here.general = here.file == ctx.path
+  local function cmp(n)
+    if n.e.general ~= here.general then return n.e.general and -1 or 1 end
+    if n.file ~= here.file then return n.file < here.file and -1 or 1 end
+    return n.end_line < here.line and -1 or (n.end_line > here.line and 1 or 0)
   end
-  local function before(n)
-    if n.file ~= here.file then return n.file < here.file end
-    return n.end_line < here.line
-  end
+  local function after(n) return cmp(n) > 0 end
+  local function before(n) return cmp(n) < 0 end
   local target
   if dir > 0 then
     for _, n in ipairs(list) do
@@ -860,6 +1016,7 @@ end
 ---@field hl string highlight of the icon
 ---@field summary string first line of the note
 ---@field summary_hl string
+---@field general boolean about the whole change: `file` is the notes file, `line` the entry
 ---@field thread string[] the whole conversation as markdown lines, for a preview
 ---@field note table the note, for `M.goto_item`
 
@@ -878,9 +1035,8 @@ function M.items(buf)
         n.e.kind,
         n.e.resolved and "resolved" or "open",
         n.e.new and "new" or "",
-        n.e.my_turn and "ask question" or "",
         n.e.draft and "draft" or "",
-        n.e.path,
+        n.e.path or "general",
         n.e.text,
       }, " "),
       file = n.file,
@@ -890,6 +1046,7 @@ function M.items(buf)
       hl = hl,
       summary = n.e.text:match("^[^\n]*"),
       thread = nf.entry_view(n.e),
+      general = n.e.general,
       summary_hl = n.e.resolved and "ReviewResolved" or "ReviewText",
       note = n,
     })
@@ -897,9 +1054,30 @@ function M.items(buf)
   return items
 end
 
---- Open an item from `M.items()` at its icon line and show its text.
+--- Go to the code of an item from `M.items()` (a note without code: its
+--- entry in the notes file).
 ---@param item review_notes.Item
 function M.goto_item(item) goto_note(item.note) end
+
+--- Open an item from `M.items()` in the note float, its code in the current
+--- window.
+---@param item review_notes.Item
+function M.open_item(item)
+  local n = item.note
+  if not n.dir then goto_note(n) end
+  remember_origin()
+  open_note(n.ctx, ref_of(n.e))
+end
+
+--- Run a note action on an item from `M.items()`: "resolve" (resolve/reopen),
+--- "draft" (toggle) or "read" (clear [new]).
+---@param item review_notes.Item
+---@param action "resolve"|"draft"|"read"
+function M.item_action(item, action)
+  local n = item.note
+  local fn = ({ resolve = resolve_at, draft = pending_at, read = read_at })[action]
+  on_entry({ ctx = n.ctx, ref = ref_of(n.e) }, assert(fn, "unknown action"))
+end
 
 -- Ask inside an async function; yields until answered.
 ---@return string?
@@ -925,10 +1103,17 @@ local function pull(ctx, opts)
   end
   local lines = load(ctx.path)
   local out, st = nf.merge(lines, r.json, opts)
-  if st.added > 0 or st.updated > 0 then save(ctx.path, out) end
+  if st.added > 0 or st.updated > 0 or st.removed > 0 then save(ctx.path, out) end
   M.refresh()
-  if not (opts and opts.quiet) then
-    notify(("pulled: %d new, %d added, %d updated"):format(st.new, st.added, st.updated))
+  local changed = st.new > 0 or st.added > 0 or st.updated > 0 or st.removed > 0
+  if not (opts and opts.quiet) and (changed or not (opts and opts.brief)) then
+    local msg = ("pulled: %d new, %d added, %d updated"):format(st.new, st.added, st.updated)
+    if st.removed > 0 then msg = msg .. (", %d gone from the remote"):format(st.removed) end
+    notify(msg)
+  end
+  if st.gone > 0 then
+    notify(("%d thread%s gone from the remote still hold%s unsent text of mine"):format(
+      st.gone, st.gone == 1 and "" or "s", st.gone == 1 and "s" or ""), vim.log.levels.WARN)
   end
   return true
 end
@@ -941,57 +1126,106 @@ function M.pull()
   backend.async(function() pull(ctx) end)
 end
 
---- Send my notes, replies and resolved state, after confirming the plan. With
---- a `submit` command everything is queued first and published at the end; if
---- publishing fails the queue is discarded, so a retry cannot duplicate.
+-- Publish the queued drafts *ids*. Returns the set of ids published and an
+-- error result, if any; what was not published is discarded, so a retry
+-- cannot duplicate.
+local function submit(ctx, ids)
+  local cmds = M.config.backend
+  local vars = { ids = table.concat(ids, ",") }
+  local r = backend.run(cmds, "submit", { root = ctx.root, vars = vars })
+  local published = {}
+  local listed = type(r.json) == "table" and type(r.json.published) == "table"
+  for _, id in ipairs(listed and r.json.published or (r.ok and ids or {})) do
+    published[tostring(id)] = true
+  end
+  local left = vim.tbl_filter(function(id) return not published[id] end, ids)
+  if #left > 0 and cmds.discard then
+    backend.run(cmds, "discard", { root = ctx.root, vars = { ids = table.concat(left, ",") } })
+  end
+  return published, not r.ok and r or nil
+end
+
+--- Pull, then send my notes, replies and resolved state, after confirming the
+--- plan. The pull first brings in what changed on the remote since the last
+--- one (flagged [new], which holds those entries back), so nothing is sent
+--- over a reply I have not read. With a `submit` command everything is queued
+--- first and published at the end, only the drafts queued here.
 local function push(ctx, opts)
   local cmds = M.config.backend
+  if not pull(ctx, opts and opts.pull) then return false, false end
   local lines = load(ctx.path)
   local plan = nf.plan(lines)
   local summary = nf.describe(plan)
-  local skipped = plan.drafts > 0 and (" (%d draft%s not sent)"):format(plan.drafts, plan.drafts == 1 and "" or "s") or ""
+  local skipped = nf.describe_skipped(plan)
   if not summary then
-    if not (opts and opts.quiet_empty) then notify("nothing to send" .. skipped) end
+    if not (opts and opts.quiet_empty) or plan.held > 0 then notify("nothing to send" .. skipped) end
     return true, false
   end
   if choose(summary .. skipped .. ". Send?", { "Send", "Cancel" }) ~= "Send" then return false, false end
 
-  local ok = { new = {}, replies = {}, summary = false }
+  local ok = { new = {}, replies = {} }
   local failures = {}
   local function fail(what, r) table.insert(failures, what .. ": " .. backend.message(r)) end
+  local function label(e) return e.general and "general note" or e.loc end
+  -- Without the ids, a submit could only publish every pending draft.
+  local by_id = cmds.submit and backend.uses(cmds, "submit", "ids")
+  local queued, ids = {}, {} -- entry -> draft id, and the ids in order
+  local function sent(set, e, r, what)
+    if not r.ok then return fail(what, r) end
+    local id = type(r.json) == "table" and r.json.id
+    if by_id and not id then
+      return fail(what, { stderr = "queued, but the backend printed no id: left pending on the remote" })
+    end
+    if by_id then
+      queued[e] = tostring(id)
+      table.insert(ids, tostring(id))
+    end
+    set[e] = true
+  end
 
   for _, e in ipairs(plan.new) do
-    -- A range is anchored at its last line, as on the remote.
-    local last = e.end_line or e.line
-    local r = backend.run(cmds, "add", { root = ctx.root, vars = { path = e.path, line = last }, stdin = e.send })
-    if r.ok then ok.new[e] = true else fail(e.path .. ":" .. last, r) end
+    local r
+    if e.general then
+      r = backend.run(cmds, "general", { root = ctx.root, stdin = e.send })
+    else
+      -- A range is anchored at its last line, as on the remote.
+      local last = e.end_line or e.line
+      r = backend.run(cmds, "add", { root = ctx.root, vars = { path = e.path, line = last }, stdin = e.send })
+    end
+    sent(ok.new, e, r, label(e))
   end
   for _, e in ipairs(plan.replies) do
     local r = backend.run(cmds, "reply", { root = ctx.root, vars = { thread = e.id }, stdin = e.send })
-    if r.ok then ok.replies[e] = true else fail("reply " .. e.path .. ":" .. e.line, r) end
+    sent(ok.replies, e, r, "reply " .. label(e))
   end
-  if cmds.submit then
-    local r = backend.run(cmds, "submit", { root = ctx.root, stdin = plan.summary })
-    if r.ok then
-      ok.summary = plan.summary ~= ""
-    else
+  if by_id and #ids > 0 then
+    local published, err = submit(ctx, ids)
+    if err then fail("submit", err) end
+    for _, set in pairs(ok) do
+      for e in pairs(set) do
+        if not published[queued[e]] then set[e] = nil end
+      end
+    end
+  elseif cmds.submit and not by_id then
+    -- An older backend config: submit publishes all pending drafts.
+    local r = backend.run(cmds, "submit", { root = ctx.root })
+    if not r.ok then
       fail("submit", r)
       if cmds.discard then backend.run(cmds, "discard", { root = ctx.root }) end
       ok.new, ok.replies = {}, {}
     end
-  elseif plan.summary ~= "" then
-    table.insert(failures, "the summary needs a `submit` command and stays in the notes")
   end
 
   -- After submit: publishing a queued reply reopens a resolved thread.
   for _, e in ipairs(plan.states) do
     local r = backend.run(cmds, e.resolved and "resolve" or "unresolve", { root = ctx.root, vars = { thread = e.id } })
-    if not r.ok then fail((e.resolved and "resolve " or "reopen ") .. e.path .. ":" .. e.line, r) end
+    if not r.ok then fail((e.resolved and "resolve " or "reopen ") .. label(e), r) end
   end
 
   save(ctx.path, nf.apply_sent(load(ctx.path), plan, ok))
   -- What I just sent comes back from the remote as the thread's comments;
-  -- quiet so it is not flagged as new.
+  -- quiet so it is not flagged as new. Only what happened during the push
+  -- itself goes unflagged: the pull before it brought in the rest.
   pull(ctx, { quiet = true })
   if #failures > 0 then
     notify("pushed with problems:\n" .. table.concat(failures, "\n"), vim.log.levels.ERROR)
@@ -1005,21 +1239,18 @@ function M.push()
   local ctx = remote_context()
   if not ctx then return end
   vim.cmd("silent! wall")
-  backend.async(function() push(ctx) end)
+  -- The pull before sending only speaks up when it brought something in.
+  backend.async(function() push(ctx, { pull = { brief = true } }) end)
 end
 
---- Push, then pull: one key to send my side and bring the remote in. Pushing
---- first means the remote already has my resolves when its state comes back
---- (remote wins). Cancelling the push stops there. A push ends with a pull of
---- its own, so a separate one only runs when nothing was sent.
+--- Pull, then push what is ready: one key to bring the remote in and send my
+--- side. A push starts with a pull, so this is a push that reports its pull
+--- and stays quiet when there is nothing to send.
 function M.sync()
   local ctx = remote_context()
   if not ctx then return end
   vim.cmd("silent! wall")
-  backend.async(function()
-    local proceed, sent = push(ctx, { quiet_empty = true })
-    if proceed and not sent then pull(ctx) end
-  end)
+  backend.async(function() push(ctx, { quiet_empty = true }) end)
 end
 
 --- Drop resolved entries that have nothing left to send.
@@ -1063,10 +1294,6 @@ function M.setup(opts)
     group = group,
     callback = function() M.refresh() end,
   })
-  vim.api.nvim_create_autocmd({ "CursorMoved", "ModeChanged", "BufEnter" }, {
-    group = group,
-    callback = show_cursor_notes,
-  })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
     group = group,
     callback = function(ev)
@@ -1082,7 +1309,7 @@ function M.setup(opts)
   set_highlights()
   vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = set_highlights })
 
-  -- Keymaps are defined by the caller (see lua/plugins/review_notes.lua).
+  -- Keymaps are defined by the caller (see the README).
 
   -- Remote operations happen once per review round: a command, not keys.
   vim.api.nvim_create_user_command("Review", function(opts)

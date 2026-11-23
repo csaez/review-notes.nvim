@@ -4,6 +4,11 @@
 -- (`require("review_notes").style`).
 local M = {}
 
+--- Filetype of read-only conversation buffers (a picker preview): markdown to
+--- treesitter (registered in ftdetect/), with its own name so a markdown
+--- renderer can be enabled for threads alone.
+M.thread_ft = "reviewthread"
+
 local ns = vim.api.nvim_create_namespace("review_notes_thread")
 
 --- Window options that make the concealed markup disappear.
@@ -22,6 +27,13 @@ function M.set(buf, lines)
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
+  M.decorate(buf, lines)
+end
+
+--- Decorate *lines*, the first lines of *buf*, as a conversation.
+---@param buf integer
+---@param lines string[]
+function M.decorate(buf, lines)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   local style = require("review_notes").style
   local resolved = require("review_notes.notes").RESOLVED_VIEW
@@ -35,9 +47,7 @@ function M.set(buf, lines)
     local row = i - 1
     if l:match("^### ") then
       vim.api.nvim_buf_set_extmark(buf, ns, row, 0, { end_col = 4, conceal = "" })
-      -- A question from pi waits for my answer, like the `ask` gutter icon.
-      local asks = l == "### @pi" and (lines[i + 1] or ""):match("^QUESTION:")
-      icon_at(row, asks and style.ask or style.thread, " ")
+      icon_at(row, style.thread, " ")
     elseif l == resolved then
       vim.api.nvim_buf_set_extmark(buf, ns, row, 0, { end_col = #l, conceal = "" })
       icon_at(row, style.resolved, " resolved")

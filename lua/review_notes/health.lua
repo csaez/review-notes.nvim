@@ -1,7 +1,7 @@
 -- :checkhealth review_notes
 local M = {}
 
-local OPTIONAL = { submit = true, discard = true }
+local OPTIONAL = { submit = true, discard = true, general = true }
 
 function M.check()
   local health = vim.health
@@ -30,7 +30,9 @@ function M.check()
     if not cmds[name] then health.error(("backend command `%s` is not configured"):format(name)) end
   end
   if not cmds.submit then
-    health.info("no `submit` command: notes are sent one by one and the summary stays in the notes")
+    health.info("no `submit` command: notes are sent one by one")
+  elseif not require("review_notes.backend").uses(cmds, "submit", "ids") then
+    health.warn("`submit` takes no `{ids}`: a push publishes every pending draft, browser ones included")
   end
 end
 

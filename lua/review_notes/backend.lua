@@ -7,7 +7,7 @@ local M = {}
 ---@field ok boolean
 ---@field stdout string
 ---@field stderr string
----@field json any? decoded stdout, when it is JSON
+---@field json any? decoded stdout, when it is JSON (also on failure: a partial result)
 
 local function substitute(argv, vars)
   local out = {}
@@ -41,11 +41,21 @@ function M.run(cmds, name, opts)
   end
   local out = coroutine.yield()
   local result = { ok = out.code == 0, stdout = out.stdout or "", stderr = vim.trim(out.stderr or "") }
-  if result.ok and vim.trim(result.stdout) ~= "" then
+  if vim.trim(result.stdout) ~= "" then
     local decoded, json = pcall(vim.json.decode, result.stdout)
     if decoded then result.json = json end
   end
   return result
+end
+
+--- Whether operation *name* takes placeholder *var*.
+---@param cmds table<string, string[]>
+---@return boolean
+function M.uses(cmds, name, var)
+  for _, arg in ipairs(cmds[name] or {}) do
+    if arg:find("{" .. var .. "}", 1, true) then return true end
+  end
+  return false
 end
 
 --- Run *fn* as a coroutine so `run` calls read like blocking code while the UI

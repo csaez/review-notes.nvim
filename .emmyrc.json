@@ -1,8 +1,0 @@
-{
-  "runtime": { "version": "LuaJIT", "requirePattern": ["?.lua", "?/init.lua"] },
-  "diagnostics": { "globals": ["vim"], "disable": ["assign-type-mismatch", "missing-fields"] },
-  "workspace": {
-    "library": ["/home/cesar-saez/dev/neovim/install/share/nvim/runtime", "~/.local/share/nvim/lazy"],
-    "ignoreGlobs": ["**/*_spec.lua"]
-  }
-}

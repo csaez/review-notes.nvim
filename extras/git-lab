@@ -1,0 +1,903 @@
+#!/usr/bin/env python3
+"""
+git-lab -- GitLab merge request tooling for the current repository.
+
+Subcommands:
+    mr list [--all] [--drafts] [--recursive] [--json]
+                            Print MRs as url<TAB>iid<TAB>author<TAB>title, or JSON.
+    mr review-assign IID [--project P]
+                            Add yourself as reviewer of the MR.
+    mr target [IID]         Print the MR target ref (origin/<branch>) for scripting.
+    mr approve [IID] [-m MSG]
+                            Approve the MR of the current branch, optionally commenting.
+    comment list [--mr IID] [--json]
+                            Threads: {id, path, line, start_line, resolved,
+                            resolvable, resolved_by, resolved_by_me,
+                            comments = [{author, body, mine}]}. Lines are those of the files
+                            on disk (start_line: multi-line comments). Overview
+                            threads (the whole MR) have path and line null;
+                            line 0 is about a whole file.
+    comment add [--mr IID] [PATH:LINE] TEXT|- [--draft] [--general] [--json]
+                            Start a thread; '-' reads the text from stdin.
+                            No location starts an overview thread, ``PATH:0``
+                            a file thread.
+                            --draft keeps it pending until ``review submit``.
+                            Files outside the MR are refused unless --general,
+                            which posts an overview thread quoting PATH:LINE.
+    comment reply [--mr IID] ID TEXT|- [--draft] [--json]
+    comment resolve|unresolve [--mr IID] ID
+    review submit [--mr IID] [-m TEXT|-] [--only IDS] [--json]
+                            Publish all pending comments, with an optional summary
+                            comment ('-' reads stdin; empty means none).
+                            --only publishes just those drafts (comma-separated
+                            ids), leaving others pending; --json prints
+                            {published: [ids]}, also when it fails part way.
+    review discard [--mr IID] [--only IDS]
+                            Delete all pending comments, or just those drafts.
+
+--mr defaults to the open MR of the current branch.
+
+Environment:
+    GITLAB_TOKEN   required -- token with api scope
+    GITLAB_HOST    optional -- overrides the host parsed from the git remote
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
+
+
+class GitLabError(Exception):
+    """Raised when a GitLab API call fails."""
+
+
+# ---------------------------------------------------------------------------
+# Git
+# ---------------------------------------------------------------------------
+def git(*args: str, cwd: str | None = None, check: bool = True) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", *args], cwd=cwd, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        if check:
+            sys.exit(f"git {' '.join(args)} failed (exit {exc.returncode})")
+        return ""
+
+
+def current_branch() -> str:
+    branch = git("branch", "--show-current", check=False)
+    # Mid-rebase HEAD is detached; the rebased branch is still the one whose
+    # MR applies (same fallback in review-notes.nvim and pi).
+    for state in ("rebase-merge", "rebase-apply"):
+        if branch:
+            break
+        head = git("rev-parse", "--git-path", f"{state}/head-name", check=False)
+        if head and os.path.isfile(head):
+            with open(head) as fh:
+                branch = fh.read().strip().removeprefix("refs/heads/")
+    if not branch:
+        sys.exit("Not on a named branch -- cannot auto-detect the MR.")
+    return branch
+
+
+def parse_remote(url: str) -> tuple[str, str] | None:
+    """Return (host, project_path) for an SSH or HTTPS remote URL."""
+    url = url.strip()
+    if url.startswith("git@"):
+        host, sep, path = url[4:].partition(":")
+        return (host, path.removesuffix(".git")) if sep else None
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    host = parsed.netloc.rpartition("@")[2]
+    return host, parsed.path.lstrip("/").removesuffix(".git")
+
+
+def submodules() -> list[tuple[str, str, str]]:
+    """Return (path, host, project) for every recursive submodule."""
+    raw = git(
+        "submodule",
+        "foreach",
+        "--recursive",
+        "--quiet",
+        "echo $displaypath $(git remote get-url origin 2>/dev/null || true)",
+        check=False,
+    )
+    result = []
+    for line in raw.splitlines():
+        parts = line.split()
+        remote = parse_remote(parts[1]) if len(parts) == 2 else None
+        if remote:
+            result.append((parts[0], *remote))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GitLab API
+# ---------------------------------------------------------------------------
+@dataclass
+class Repo:
+    host: str
+    project: str
+    token: str
+    path: str = "."
+
+    @property
+    def base(self) -> str:
+        return f"/api/v4/projects/{urllib.parse.quote(self.project, safe='')}"
+
+    def api(self, method: str, path: str, payload: dict | None = None) -> Any:
+        url = f"https://{self.host}{path}"
+        data = json.dumps(payload).encode() if payload is not None else None
+        headers = {"PRIVATE-TOKEN": self.token, "Content-Type": "application/json"}
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                body = resp.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:400]
+            raise GitLabError(f"HTTP {exc.code} {method} {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise GitLabError(f"Network error reaching {url}: {exc.reason}") from exc
+        return json.loads(body) if body else None
+
+    def get_all(self, path: str, params: dict | None = None) -> list[dict]:
+        items: list[dict] = []
+        for page in range(1, 21):  # safety cap
+            qs = urllib.parse.urlencode(
+                {**(params or {}), "per_page": 100, "page": page}
+            )
+            batch = self.api("GET", f"{path}?{qs}")
+            items.extend(batch)
+            if len(batch) < 100:
+                break
+        return items
+
+    def mr_path(self, iid: int) -> str:
+        return f"{self.base}/merge_requests/{iid}"
+
+
+def repo_from_cwd(cwd: str | None = None) -> Repo:
+    token = os.environ.get("GITLAB_TOKEN", "")
+    if not token:
+        sys.exit("GITLAB_TOKEN environment variable is not set.")
+    remote = parse_remote(git("remote", "get-url", "origin", cwd=cwd))
+    if not remote:
+        sys.exit("Cannot parse the origin remote URL.")
+    host, project = remote
+    return Repo(os.environ.get("GITLAB_HOST") or host, project, token)
+
+
+def or_exit(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except GitLabError as exc:
+        sys.exit(str(exc))
+
+
+def list_mrs(repo: Repo, state: str = "opened") -> list[dict]:
+    return or_exit(
+        repo.get_all,
+        f"{repo.base}/merge_requests",
+        {"state": state, "order_by": "updated_at", "sort": "desc"},
+    )
+
+
+def get_mr(repo: Repo, iid: int) -> dict:
+    return or_exit(repo.api, "GET", repo.mr_path(iid))
+
+
+def mrs_for_branch(repo: Repo, branch: str) -> list[dict]:
+    return or_exit(
+        repo.get_all,
+        f"{repo.base}/merge_requests",
+        {"source_branch": branch, "state": "opened"},
+    )
+
+
+def resolve_mr(repo: Repo, iid: int | None) -> dict:
+    """Return the MR with *iid*, or the open MR of the current branch."""
+    if iid is not None:
+        return get_mr(repo, iid)
+    branch = current_branch()
+    mrs = mrs_for_branch(repo, branch)
+    if not mrs:
+        sys.exit(f"No open MR for branch '{branch}' in {repo.project} (use --mr IID).")
+    # The list endpoint omits diff_refs, which notes push needs.
+    mr = mrs[0] if len(mrs) == 1 else pick_mr(mrs)
+    return get_mr(repo, mr["iid"])
+
+
+def mr_url(repo: Repo, mr: dict) -> str:
+    return (
+        mr.get("web_url")
+        or f"https://{repo.host}/{repo.project}/-/merge_requests/{mr['iid']}"
+    )
+
+
+def pick_mr(mrs: list[dict]) -> dict:
+    def line(mr: dict) -> str:
+        labels = "".join(f"  [{lbl}]" for lbl in mr.get("labels") or [])
+        author = (mr.get("author") or {}).get("username", "?")
+        state = "" if mr.get("state") == "opened" else f" [{mr.get('state')}]"
+        return f"!{mr['iid']:<5}  {mr.get('title', '')}{labels}  @{author}  {mr.get('source_branch', '?')}{state}"
+
+    try:
+        proc = subprocess.run(
+            [
+                "fzf",
+                "--prompt=Select MR> ",
+                "--height=40%",
+                "--layout=reverse",
+                "--no-multi",
+            ],
+            input="\n".join(line(mr) for mr in mrs),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        sys.exit("fzf not found -- pass an IID instead.")
+    if proc.returncode != 0 or not proc.stdout.strip():
+        sys.exit("No MR selected.")
+    iid = int(proc.stdout.split()[0].lstrip("!"))
+    return next(mr for mr in mrs if mr["iid"] == iid)
+
+
+# ---------------------------------------------------------------------------
+# Inline positions
+# ---------------------------------------------------------------------------
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def old_line_for(base: str, head: str, path: str, line: int) -> tuple[bool, int | None]:
+    """
+    Map *line* of *path* at *head* to its line at *base*.
+
+    :return: ``(ok, old_line)``; ``old_line`` is None for lines the MR added,
+        ``ok`` is False when the diff could not be computed.
+    """
+    proc = subprocess.run(
+        ["git", "diff", "-U0", base, head, "--", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return False, None
+    offset = 0
+    for raw in proc.stdout.splitlines():
+        m = _HUNK_RE.match(raw)
+        if not m:
+            continue
+        old_count = int(m[2]) if m[2] is not None else 1
+        new_start, new_count = int(m[3]), int(m[4]) if m[4] is not None else 1
+        before = line < new_start if new_count else line <= new_start
+        if before:
+            break
+        if line < new_start + new_count:
+            return True, None
+        offset += new_count - old_count
+    return True, line - offset
+
+
+class LineMapper:
+    """Maps lines of remote positions to the files on disk, one diff per
+    commit and file pair (cached for a whole thread list)."""
+
+    def __init__(self) -> None:
+        self._hunks: dict[
+            tuple[str, tuple[str, ...]], list[tuple[int, int, int, int]] | None
+        ] = {}
+
+    def _diff(
+        self, sha: str, paths: tuple[str, ...]
+    ) -> list[tuple[int, int, int, int]] | None:
+        key = (sha, paths)
+        if key not in self._hunks:
+            # Against the working tree: notes refer to the files as saved.
+            proc = subprocess.run(
+                ["git", "diff", "-U0", "-M", sha, "--", *paths],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            hunks = None
+            if proc.returncode == 0:
+                hunks = []
+                for raw in proc.stdout.splitlines():
+                    if m := _HUNK_RE.match(raw):
+                        hunks.append(
+                            (
+                                int(m[1]),
+                                int(m[2]) if m[2] is not None else 1,
+                                int(m[3]),
+                                int(m[4]) if m[4] is not None else 1,
+                            )
+                        )
+            self._hunks[key] = hunks
+        return self._hunks[key]
+
+    def map(self, sha: str, paths: tuple[str, ...], line: int) -> int:
+        """*line* of the file at *sha* on disk: a changed or removed line goes
+        to where it was; unchanged when the diff cannot be computed (e.g. the
+        commit is not fetched)."""
+        hunks = self._diff(sha, paths)
+        if hunks is None:
+            return line
+        offset = 0
+        for old_start, old_count, new_start, new_count in hunks:
+            if old_count == 0:
+                # Lines inserted after old_start.
+                if line <= old_start:
+                    break
+            else:
+                if line < old_start:
+                    break
+                if line < old_start + old_count:
+                    return max(1, new_start if new_count else new_start + 1)
+            offset += new_count - old_count
+        return max(1, line + offset)
+
+    def position(self, pos: dict) -> tuple[int, int | None]:
+        """``(line, start)`` on disk for a text position: its new side at its
+        head commit, else (a removed line) its old side at the base commit.
+        *start* is the first line of a multi-line comment, else None."""
+        paths = tuple(
+            dict.fromkeys(p for p in (pos.get("old_path"), pos.get("new_path")) if p)
+        )
+
+        def side(point: dict) -> int | None:
+            if point.get("new_line"):
+                return self.map(pos.get("head_sha") or "HEAD", paths, point["new_line"])
+            if point.get("old_line"):
+                return self.map(pos.get("base_sha") or "HEAD", paths, point["old_line"])
+            return None
+
+        line = side(pos) or 1
+        start = side((pos.get("line_range") or {}).get("start") or {})
+        return line, start if start is not None and start < line else None
+
+
+# ---------------------------------------------------------------------------
+# Commands: mr
+# ---------------------------------------------------------------------------
+def cmd_mr_list(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    repos = [repo]
+    if args.recursive:
+        host_override = os.environ.get("GITLAB_HOST")
+        repos += [
+            Repo(host_override or h, p, repo.token, path) for path, h, p in submodules()
+        ]
+    seen: set[str] = set()
+    result: list[dict] = []
+    for r in repos:
+        for mr in list_mrs(r, "all" if args.all else "opened"):
+            url = mr.get("web_url", "")
+            if url in seen or (mr.get("draft") and not args.drafts):
+                continue
+            seen.add(url)
+            mr["_repo"] = r.project
+            mr["_path"] = r.path
+            result.append(mr)
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+    for mr in result:
+        author = (mr.get("author") or {}).get("username", "?")
+        print(f"{mr.get('web_url', '')}\t{mr['iid']}\t{author}\t{mr.get('title', '')}")
+
+
+def cmd_mr_review_assign(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    if args.project and args.project != repo.project:
+        match = next((s for s in submodules() if s[2] == args.project), None)
+        if not match:
+            sys.exit(f"No submodule with project {args.project}.")
+        repo = Repo(os.environ.get("GITLAB_HOST") or match[1], match[2], repo.token)
+    mr = get_mr(repo, args.iid)
+    user = or_exit(repo.api, "GET", "/api/v4/user")
+    reviewers = [r["id"] for r in mr.get("reviewers") or []]
+    if user["id"] not in reviewers:
+        or_exit(
+            repo.api,
+            "PUT",
+            repo.mr_path(mr["iid"]),
+            {"reviewer_ids": reviewers + [user["id"]]},
+        )
+    print(f"Assigned @{user['username']} as reviewer of !{mr['iid']}")
+
+
+def guess_target(repo: Repo, branch: str) -> str:
+    """Guess the target for a branch without an MR: the nearest protected branch.
+
+    Exits 1 when unknown, 2 when *branch* is itself protected.
+    """
+    try:
+        protected = {b["name"] for b in repo.get_all(f"{repo.base}/protected_branches")}
+    except GitLabError:
+        sys.exit(1)
+    if branch in protected:
+        print(
+            f"'{branch}' is protected and unlikely to have an MR target.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    remote = {
+        ln.strip().removeprefix("origin/")
+        for ln in git("branch", "-r", check=False).splitlines()
+        if ln.strip().startswith("origin/") and "->" not in ln
+    }
+    candidates = protected & remote
+    if not candidates:
+        sys.exit(1)
+
+    def ahead(b: str) -> int:
+        out = git("rev-list", "--count", f"origin/{b}..HEAD", check=False)
+        return int(out) if out.isdigit() else sys.maxsize
+
+    return f"origin/{min(candidates, key=ahead)}"
+
+
+def cmd_mr_target(args: argparse.Namespace) -> None:
+    """Print ``origin/<target>``; exit 1 when unknown, 2 on a protected branch."""
+    repo = repo_from_cwd()
+    if args.iid is not None:
+        mrs = [get_mr(repo, args.iid)]
+    else:
+        branch = git("branch", "--show-current", check=False)
+        if not branch:
+            sys.exit(1)
+        mrs = mrs_for_branch(repo, branch)
+    if mrs and mrs[0].get("target_branch"):
+        print(f"origin/{mrs[0]['target_branch']}")
+    elif args.iid is not None:
+        sys.exit(1)
+    else:
+        print(guess_target(repo, branch))
+
+
+def cmd_mr_approve(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.iid)
+    print(f"Approving MR !{mr['iid']}: {mr.get('title', '')}\n  {mr_url(repo, mr)}")
+    if args.message:
+        or_exit(
+            repo.api, "POST", f"{repo.mr_path(mr['iid'])}/notes", {"body": args.message}
+        )
+        print("  comment posted")
+    or_exit(repo.api, "POST", f"{repo.mr_path(mr['iid'])}/approve")
+    print("  approved")
+
+
+# ---------------------------------------------------------------------------
+# Commands: comment, review
+# ---------------------------------------------------------------------------
+def read_text(arg: str) -> str:
+    """*arg* itself, or all of stdin when it is ``-``."""
+    text = sys.stdin.read() if arg == "-" else arg
+    text = text.strip()
+    if not text:
+        sys.exit("Empty comment text.")
+    return text
+
+
+def parse_location(loc: str) -> tuple[str, int]:
+    path, sep, line = loc.rpartition(":")
+    if not sep or not path or not line.isdigit():
+        sys.exit(f"Expected PATH:LINE, got '{loc}'.")
+    return path, int(line)
+
+
+def inline_position(repo: Repo, mr: dict, path: str, line: int) -> dict:
+    """GitLab diff position for *line* of *path* at the MR head; line 0 is
+    the whole file."""
+    # GitLab accepts a draft on a file outside the MR and then silently drops
+    # it when published, so refuse up front.
+    diffs = or_exit(repo.get_all, f"{repo.mr_path(mr['iid'])}/diffs")
+    if path not in {d.get("new_path") for d in diffs}:
+        sys.exit(
+            f"{path} is not changed by MR !{mr['iid']}; "
+            "use --general to post it as a general comment."
+        )
+    refs = mr.get("diff_refs") or {}
+    if not refs.get("head_sha"):
+        sys.exit("The MR has no diff refs yet.")
+    shas = {k: refs[k] for k in ("base_sha", "start_sha", "head_sha")}
+    if line == 0:
+        return {"position_type": "file", **shas, "new_path": path, "old_path": path}
+    # Line numbers only mean something when the checkout is what GitLab shows.
+    if git("rev-parse", "HEAD") != refs["head_sha"]:
+        sys.exit(
+            f"HEAD is not the MR head ({refs['head_sha'][:10]}); "
+            "check out the MR branch first."
+        )
+    _, old = old_line_for(refs["base_sha"], refs["head_sha"], path, line)
+    position = {
+        "position_type": "text",
+        **shas,
+        "new_path": path,
+        "old_path": path,
+        "new_line": line,
+    }
+    if old is not None:
+        position["old_line"] = old
+    return position
+
+
+def thread_json(disc: dict, me: str, lines: LineMapper | None = None) -> dict | None:
+    """A GitLab discussion as ``{id, path, line, start_line, resolved,
+    resolvable, resolved_by, resolved_by_me, comments = [{author, body,
+    mine}]}``, or None when it has no comments (system notes only).
+    ``resolved_by`` is the username that resolved it (None when open or
+    unknown); ``mine`` and ``resolved_by_me`` compare with *me*, so callers
+    can tell my own activity (in the browser too) from someone else's.
+
+    An overview comment has path and line None; a file comment (or one on
+    an image) has line 0. With *lines*, a line comment is mapped to the file
+    on disk (a comment on a removed line, or made on an older version of the
+    MR, lands where its code is now); ``start_line`` is the first line of a
+    multi-line comment, else None. A one-off comment (not resolvable) counts as
+    resolved when it is *me*'s (my summary, an approval message), so it does
+    not come back as something to act on.
+    """
+    notes = [n for n in disc.get("notes") or [] if not n.get("system")]
+    if not notes:
+        return None
+    pos = notes[0].get("position") or {}
+    path = pos.get("new_path") or pos.get("old_path")
+    line = (pos.get("new_line") or pos.get("old_line") or 0) if path else None
+    start = None
+    if path and pos.get("position_type") in ("file", "image"):
+        line = 0
+    elif path and lines:
+        line, start = lines.position(pos)
+    resolvable = any(n.get("resolvable") for n in notes)
+    author = (notes[0].get("author") or {}).get("username")
+    resolved = bool(disc.get("resolved")) if resolvable else author == me
+    # Resolving a thread sets resolved_by on each of its resolvable notes.
+    resolver = None
+    if resolvable and resolved:
+        for n in notes:
+            resolver = (n.get("resolved_by") or {}).get("username") or resolver
+    return {
+        "id": disc["id"],
+        "path": path,
+        "line": line,
+        "start_line": start,
+        "resolved": resolved,
+        "resolvable": resolvable,
+        "resolved_by": resolver,
+        "resolved_by_me": resolver is not None and resolver == me,
+        "comments": [
+            {
+                "author": (n.get("author") or {}).get("username", "unknown"),
+                "body": n.get("body") or "",
+                "mine": (n.get("author") or {}).get("username") == me,
+            }
+            for n in notes
+        ],
+    }
+
+
+def emit_id(args: argparse.Namespace, ident: Any, what: str) -> None:
+    if args.json:
+        print(json.dumps({"id": str(ident)}))
+    else:
+        print(f"{what} {ident}")
+
+
+def cmd_comment_list(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.mr)
+    discussions = or_exit(repo.get_all, f"{repo.mr_path(mr['iid'])}/discussions")
+    me = or_exit(repo.api, "GET", "/api/v4/user")["username"]
+    lines = LineMapper()
+    threads = [t for d in discussions if (t := thread_json(d, me, lines))]
+    if args.json:
+        print(json.dumps(threads, indent=2))
+        return
+    for t in sorted(threads, key=lambda t: (t["path"] or "", t["line"] or 0)):
+        state = " [resolved]" if t["resolved"] else ""
+        span = f"{t['start_line']}-{t['line']}" if t["start_line"] else t["line"]
+        where = f"{t['path']}:{span}" if t["path"] else "(overview)"
+        print(f"{where}{state}  ({t['id'][:8]})")
+        for c in t["comments"]:
+            first, *rest = c["body"].splitlines() or [""]
+            print(f"  @{c['author']}: {first}")
+            for line in rest:
+                print(f"    {line}")
+
+
+def cmd_comment_add(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.mr)
+    path, line = parse_location(args.location) if args.location else (None, 0)
+    text = read_text(args.text)
+    mr_api = repo.mr_path(mr["iid"])
+    if args.general and path:
+        # Not anchored to the diff, so the location goes into the text.
+        text = f"`{path}:{line}`\n\n{text}"
+    if args.general or not path:
+        # A thread on the MR itself; a draft without a position publishes as
+        # a resolvable thread too.
+        if args.draft:
+            res = or_exit(repo.api, "POST", f"{mr_api}/draft_notes", {"note": text})
+            emit_id(args, res["id"], "draft")
+        else:
+            res = or_exit(repo.api, "POST", f"{mr_api}/discussions", {"body": text})
+            emit_id(args, res["id"], "thread")
+        return
+    position = inline_position(repo, mr, path, line)
+    if args.draft:
+        res = or_exit(
+            repo.api,
+            "POST",
+            f"{mr_api}/draft_notes",
+            {"note": text, "position": position},
+        )
+        emit_id(args, res["id"], "draft")
+    else:
+        res = or_exit(
+            repo.api,
+            "POST",
+            f"{mr_api}/discussions",
+            {"body": text, "position": position},
+        )
+        emit_id(args, res["id"], "thread")
+
+
+def cmd_comment_reply(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.mr)
+    text = read_text(args.text)
+    mr_api = repo.mr_path(mr["iid"])
+    if args.draft:
+        res = or_exit(
+            repo.api,
+            "POST",
+            f"{mr_api}/draft_notes",
+            {"note": text, "in_reply_to_discussion_id": args.thread},
+        )
+        emit_id(args, res["id"], "draft")
+    else:
+        res = or_exit(
+            repo.api,
+            "POST",
+            f"{mr_api}/discussions/{args.thread}/notes",
+            {"body": text},
+        )
+        emit_id(args, res["id"], "note")
+
+
+def cmd_comment_resolve(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.mr)
+    resolved = args.cmd_name == "resolve"
+    path = f"{repo.mr_path(mr['iid'])}/discussions/{args.thread}"
+    try:
+        repo.api("PUT", path, {"resolved": resolved})
+    except GitLabError as exc:
+        # A one-off comment has no resolved state on GitLab: callers keep it
+        # locally, so that is not an error.
+        disc = or_exit(repo.api, "GET", path)
+        if any(n.get("resolvable") for n in disc.get("notes") or []):
+            sys.exit(str(exc))
+        print(f"{args.thread} is not resolvable on GitLab; state kept locally")
+        return
+    print(f"{'resolved' if resolved else 'reopened'} {args.thread}")
+
+
+def list_drafts(repo: Repo, mr: dict) -> list[dict]:
+    return or_exit(repo.get_all, f"{repo.mr_path(mr['iid'])}/draft_notes")
+
+
+def parse_ids(arg: str) -> set[str]:
+    ids = {i.strip() for i in arg.split(",") if i.strip()}
+    if not ids:
+        # Never widen an empty selection to all drafts.
+        sys.exit("--only needs at least one draft id")
+    return ids
+
+
+def publish_only(
+    repo: Repo, mr_api: str, drafts: list[dict], ids: set[str]
+) -> list[str]:
+    """Publish the drafts *ids* and return them. One bulk publish when they
+    are all the pending drafts (one notification, like the web's submit);
+    otherwise one by one, so other drafts (a review started in the browser)
+    stay pending. On failure exits with the ids published so far as JSON."""
+    pending = {str(d["id"]) for d in drafts}
+    missing = ids - pending
+    if missing:
+        sys.exit(f"not pending drafts: {', '.join(sorted(missing))}")
+    if ids == pending:
+        or_exit(repo.api, "POST", f"{mr_api}/draft_notes/bulk_publish")
+        return sorted(ids)
+    published: list[str] = []
+    for ident in sorted(ids, key=lambda i: int(i) if i.isdigit() else 0):
+        try:
+            repo.api("PUT", f"{mr_api}/draft_notes/{ident}/publish")
+        except GitLabError as exc:
+            print(json.dumps({"published": published}))
+            sys.exit(str(exc))
+        published.append(ident)
+    return published
+
+
+def cmd_review_submit(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.mr)
+    mr_api = repo.mr_path(mr["iid"])
+    drafts = list_drafts(repo, mr)
+    only = parse_ids(args.only) if args.only is not None else None
+    # `-m -` with nothing on stdin means no summary, so callers can always
+    # pass the summary they have.
+    summary = ""
+    if args.message == "-":
+        summary = sys.stdin.read().strip()
+    elif args.message:
+        summary = read_text(args.message)
+    if not (drafts or summary or only):
+        if args.json:
+            print(json.dumps({"published": []}))
+        else:
+            print(f"MR !{mr['iid']}: nothing to submit")
+        return
+    if summary:
+        or_exit(repo.api, "POST", f"{mr_api}/notes", {"body": summary})
+        if not args.json:
+            print("summary posted")
+    if only is not None:
+        published = publish_only(repo, mr_api, drafts, only)
+    elif drafts:
+        or_exit(repo.api, "POST", f"{mr_api}/draft_notes/bulk_publish")
+        published = [str(d["id"]) for d in drafts]
+    else:
+        published = []
+    if args.json:
+        print(json.dumps({"published": published}))
+        return
+    if published:
+        print(f"published {len(published)} pending comments")
+    print(mr_url(repo, mr))
+
+
+def cmd_review_discard(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    mr = resolve_mr(repo, args.mr)
+    mr_api = repo.mr_path(mr["iid"])
+    pending = [str(d["id"]) for d in list_drafts(repo, mr)]
+    # A selected draft no longer pending was published or deleted already.
+    ids = (
+        [i for i in pending if i in parse_ids(args.only)]
+        if args.only is not None
+        else pending
+    )
+    for ident in ids:
+        or_exit(repo.api, "DELETE", f"{mr_api}/draft_notes/{ident}")
+    print(f"discarded {len(ids)} pending comments")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="git-lab",
+        description=textwrap.dedent(__doc__ or ""),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    mr = sub.add_parser("mr", help="Merge request operations.").add_subparsers(
+        dest="mr_cmd", required=True
+    )
+    ls = mr.add_parser("list", help="List MRs.")
+    ls.add_argument("--all", action="store_true", help="Include merged and closed MRs.")
+    ls.add_argument("--drafts", action="store_true", help="Include draft MRs.")
+    ls.add_argument(
+        "--recursive", action="store_true", help="Include submodule projects."
+    )
+    ls.add_argument("--json", action="store_true", help="Print full MR data as JSON.")
+    ls.set_defaults(fn=cmd_mr_list)
+
+    ra = mr.add_parser("review-assign", help="Assign yourself as reviewer.")
+    ra.add_argument("iid", type=int)
+    ra.add_argument("--project", help="GitLab project path (a submodule of this repo).")
+    ra.set_defaults(fn=cmd_mr_review_assign)
+
+    tg = mr.add_parser("target", help="Print the MR target ref.")
+    tg.add_argument("iid", type=int, nargs="?")
+    tg.set_defaults(fn=cmd_mr_target)
+
+    ap = mr.add_parser("approve", help="Approve the MR.")
+    ap.add_argument("iid", type=int, nargs="?")
+    ap.add_argument("-m", "--message", help="General comment to post first.")
+    ap.set_defaults(fn=cmd_mr_approve)
+
+    def mr_opt(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--mr", type=int, metavar="IID", help="Default: MR of the current branch."
+        )
+
+    comment = sub.add_parser("comment", help="Inline MR comments.").add_subparsers(
+        dest="comment_cmd", required=True
+    )
+    cl = comment.add_parser("list", help="List threads.")
+    mr_opt(cl)
+    cl.add_argument("--json", action="store_true")
+    cl.set_defaults(fn=cmd_comment_list)
+
+    ca = comment.add_parser(
+        "add", help="Start a thread at PATH:LINE (PATH:0 file; none: overview)."
+    )
+    mr_opt(ca)
+    ca.add_argument("location", metavar="PATH:LINE", nargs="?")
+    ca.add_argument("text", metavar="TEXT|-", help="'-' reads stdin.")
+    ca.add_argument("--draft", action="store_true", help="Pending until review submit.")
+    ca.add_argument(
+        "--general",
+        action="store_true",
+        help="MR thread quoting PATH:LINE, for files outside the diff.",
+    )
+    ca.add_argument("--json", action="store_true")
+    ca.set_defaults(fn=cmd_comment_add)
+
+    cr = comment.add_parser("reply", help="Reply to a thread.")
+    mr_opt(cr)
+    cr.add_argument("thread", metavar="ID")
+    cr.add_argument("text", metavar="TEXT|-", help="'-' reads stdin.")
+    cr.add_argument("--draft", action="store_true", help="Pending until review submit.")
+    cr.add_argument("--json", action="store_true")
+    cr.set_defaults(fn=cmd_comment_reply)
+
+    for name, helptext in (
+        ("resolve", "Resolve a thread."),
+        ("unresolve", "Reopen a thread."),
+    ):
+        cs = comment.add_parser(name, help=helptext)
+        mr_opt(cs)
+        cs.add_argument("thread", metavar="ID")
+        cs.set_defaults(fn=cmd_comment_resolve, cmd_name=name)
+
+    review = sub.add_parser("review", help="Pending (draft) review.").add_subparsers(
+        dest="review_cmd", required=True
+    )
+    rb = review.add_parser("submit", help="Publish all pending comments.")
+    mr_opt(rb)
+    rb.add_argument("-m", "--message", metavar="TEXT|-", help="Summary comment.")
+    rb.add_argument(
+        "--only", metavar="IDS", help="Only these drafts (comma-separated)."
+    )
+    rb.add_argument("--json", action="store_true", help="Print {published: [ids]}.")
+    rb.set_defaults(fn=cmd_review_submit)
+
+    rd = review.add_parser("discard", help="Delete all pending comments.")
+    mr_opt(rd)
+    rd.add_argument(
+        "--only", metavar="IDS", help="Only these drafts (comma-separated)."
+    )
+    rd.set_defaults(fn=cmd_review_discard)
+
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

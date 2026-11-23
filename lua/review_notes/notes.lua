@@ -2,9 +2,13 @@
 -- merge, push plan, tag changes, clean). No buffers and no processes here, so
 -- everything is testable with plain line lists.
 --
--- Format, one entry per `path:line[-end]:` line, indented lines belong to it:
+-- Format: an unindented line starts an entry, indented lines belong to it.
+-- `path:line[-end]:` in front makes it a note on code; without a location it
+-- is a general note, about the whole change (a GitLab overview thread):
 --
---   Overall looks good, main concern is the connect timeout.      summary
+--   main concern is the connect timeout                           general note
+--   [id:ghi789] [new] @alice: please add a changelog entry        general thread
+--     > @bob: +1
 --
 --   src/http.cpp:88: timeout must cover connect, not only read    new note
 --   src/http.cpp:90: [draft] maybe a leak here?                   never sent
@@ -20,20 +24,29 @@
 --   [new]    someone else changed the entry since I last acted on it: set by
 --            pull (a thread is new or its comments changed) and by pi after a
 --            round (an entry it added or changed). Stays until I reply,
---            resolve, reopen or accept it.
+--            resolve, reopen or accept it; until then push holds the entry
+--            back, so nothing is sent over what I have not read.
 -- Quoted (`> `) lines are a cache of the remote thread, rewritten on pull
 -- (remote wins). Other indented lines are mine and pull never touches them.
 -- Body lines lose exactly their two-space indent, so code keeps its own
 -- indentation, and blank lines between my lines are kept (paragraphs). A line
 -- of mine that starts with `>` is written as `\>` so it is not read as quoted.
--- Lines starting with `#` are ignored. Paths are relative to the review's
--- root; an absolute one (written by hand) is never sent: GitLab only takes
--- repo paths.
+-- Lines starting with `#` are ignored. A general note whose text would read
+-- as something else (a location, a tag, `#`) is written with a leading `\`.
+-- Paths are relative to the review's root; an absolute one (written by hand)
+-- is never sent: GitLab only takes repo paths.
+--
+-- Line 0 is the whole file. An entry on a directory (a submodule pointer)
+-- has no code to show it on; it lives in the notes file only.
+--
+--   src/http.cpp:0: [id:jkl012] @bob: split this file         whole file
+--   extern/lib:1: [id:mno345] @bob: bump to the 2.1 tag       submodule
+--
+-- Pull keeps the file in order: general entries first, then notes on code
+-- by path and line.
 local M = {}
 
 local RESOLVED_MARK = "> (resolved)"
--- How pi asks under a note (review-notes.ts, /fixup).
-M.PI_QUESTION = "> @pi: QUESTION:"
 
 --- Line of a conversation view (thread_view, entry_view) for a resolved thread.
 M.RESOLVED_VIEW = "> [!TIP] Resolved"
@@ -59,8 +72,9 @@ local function dedent(raw)
 end
 
 ---@class review_notes.Entry
----@field path string
----@field line integer
+---@field general boolean about the whole change: no path, line or loc
+---@field path string?
+---@field line integer?
 ---@field end_line integer?
 ---@field head string first-line text, without tags
 ---@field text string head and body lines, for display
@@ -73,15 +87,16 @@ end
 ---@field quoted string[] remote cache, without the resolved marker
 ---@field mine string[] my unsent lines
 ---@field remote_resolved boolean the thread's resolved state as of the last pull
----@field my_turn boolean open and ending with a question from pi: waiting for my answer
 ---@field src integer line of the entry head in the file
 ---@field last integer last line of the entry
----@field loc string location as written, e.g. "a.py:3-5"
+---@field loc string? location as written, e.g. "a.py:3-5"
 ---@field raw string the head line as read
 ---@field send string? text to send, set by plan()
 
+-- An entry head; *path* nil makes it a general entry.
 local function new_entry(i, raw, path, first, last, text)
   local e = {
+    general = path == nil,
     path = path,
     line = tonumber(first),
     end_line = last and tonumber(last) or nil,
@@ -92,7 +107,7 @@ local function new_entry(i, raw, path, first, last, text)
     src = i,
     last = i,
     raw = raw,
-    loc = path .. ":" .. first .. (last and ("-" .. last) or ""),
+    loc = path and (path .. ":" .. first .. (last and ("-" .. last) or "")) or nil,
   }
   while true do
     local tag, after = text:match("^%[([%w:_%.%-]+)%]%s*(.*)$")
@@ -109,8 +124,17 @@ local function new_entry(i, raw, path, first, last, text)
     end
     text = after
   end
+  if e.general and text:sub(1, 1) == "\\" then text = text:sub(2) end
   e.head = text
   return e
+end
+
+local LOC_PAT = "^([^%s#>:\\][^%s:]*):(%d+)"
+
+-- The head of a general entry, escaped when it would read as something else.
+local function escape_general(head)
+  if head:match("^[%[#\\]") or head:match(LOC_PAT .. "%-?%d*:") then return "\\" .. head end
+  return head
 end
 
 local function finish(e)
@@ -138,10 +162,6 @@ local function finish(e)
   end
   e.kind = e.id and "thread" or "note"
   e.text = table.concat(vim.list_extend({ e.head }, vim.tbl_map(M.unescape, e.body)), "\n")
-  -- Remote threads have no such marker: pull flags their changes as [new]
-  -- (quoted lines do not say which author is me).
-  local last = prev == "quoted" and e.quoted[#e.quoted] or ""
-  e.my_turn = not e.resolved and vim.startswith(last, M.PI_QUESTION)
 end
 
 --- My lines of *e* as text (unescaped), for display and sending.
@@ -153,18 +173,22 @@ end
 
 ---@param lines string[]
 ---@return review_notes.Entry[] entries
----@return integer[] summary indices of the summary lines
 local function scan(lines)
-  local entries, summary = {}, {}
+  local entries = {}
   local cur ---@type review_notes.Entry?
   local blanks = 0 -- blank lines seen in the current entry, kept if more body follows
   for i, raw in ipairs(lines) do
     -- `path:line: text` or `path:first-last: text`
-    local path, first, last, text = raw:match("^([^%s#>:][^%s:]*):(%d+)%-(%d+):%s?(.*)$")
+    local path, first, last, text = raw:match(LOC_PAT .. "%-(%d+):%s?(.*)$")
     if not path then
-      path, first, text = raw:match("^([^%s#>:][^%s:]*):(%d+):%s?(.*)$")
+      path, first, text = raw:match(LOC_PAT .. ":%s?(.*)$")
     end
-    if path then
+    if path == "." and first == "0" and not last then
+      -- The old way of writing a general note; rewritten without it on edit.
+      cur = new_entry(i, raw, nil, nil, nil, text or "")
+      table.insert(entries, cur)
+      blanks = 0
+    elseif path then
       cur = new_entry(i, raw, path, first, last, text or "")
       table.insert(entries, cur)
       blanks = 0
@@ -175,33 +199,28 @@ local function scan(lines)
       blanks = 0
       table.insert(cur.body, dedent(raw))
       cur.last = i
-    elseif not raw:match("^%s*$") then
+    elseif raw:match("^#") then
       cur = nil
-      if not raw:match("^#") then table.insert(summary, i) end
+    elseif cur and cur.general and not cur.id and blanks == 0 and not raw:match("^%[") then
+      -- Hand-written prose: the lines of a paragraph are one general note.
+      table.insert(cur.body, vim.trim(raw))
+      cur.last = i
+    elseif not raw:match("^%s*$") then
+      cur = new_entry(i, raw, nil, nil, nil, raw)
+      table.insert(entries, cur)
+      blanks = 0
     end
   end
   for _, e in ipairs(entries) do
     finish(e)
   end
-  return entries, summary
+  return entries
 end
 
 ---@param lines string[]
 ---@return review_notes.Entry[]
 function M.parse(lines)
-  return (scan(lines))
-end
-
---- The overall review comment: the lines that belong to no entry.
----@return string text
----@return integer[] indices
-function M.summary(lines)
-  local _, idx = scan(lines)
-  local parts = {}
-  for _, i in ipairs(idx) do
-    table.insert(parts, lines[i])
-  end
-  return vim.trim(table.concat(parts, "\n")), idx
+  return scan(lines)
 end
 
 --- The head line of *e*, with its tags.
@@ -213,8 +232,9 @@ function M.head_line(e)
   if e.draft then table.insert(tags, "[draft]") end
   if e.id then table.insert(tags, "[id:" .. e.id .. "]") end
   if e.new then table.insert(tags, "[new]") end
-  table.insert(tags, e.head)
-  local line = e.loc .. ": " .. table.concat(tags, " ")
+  table.insert(tags, e.general and escape_general(e.head) or e.head)
+  local line = table.concat(tags, " ")
+  if not e.general then line = e.loc .. ": " .. line end
   return (line:gsub("%s+$", ""))
 end
 
@@ -292,6 +312,14 @@ function M.turn(lines, idx)
     table.insert(text, M.unescape(dedent(lines[i])))
   end
   return { whole = whole, first = whole and e.src or from, last = e.last, text = text }
+end
+
+--- Remove the entry at *idx*.
+---@return string[]
+function M.delete_entry(lines, idx)
+  local e = entry_at(lines, idx)
+  if not e then return lines end
+  return tidy(splice(lines, e.src, e.last, {}))
 end
 
 --- Replace my latest turn in the entry at *idx* (see `turn`) with *text*.
@@ -394,11 +422,13 @@ function M.entry_view(e)
   return out
 end
 
---- Lines of a new entry at *loc* with *text* (first line is the head).
+--- Lines of a new entry at *loc* (nil: a general entry) with *text* (first
+--- line is the head).
+---@param loc string?
 ---@param text string[]
 ---@return string[]
 function M.new_entry_lines(loc, text)
-  local out = { loc .. ": " .. text[1] }
+  local out = { loc and (loc .. ": " .. text[1]) or escape_general(text[1]) }
   for i = 2, #text do
     table.insert(out, text[i] == "" and "" or ("  " .. M.escape(text[i])))
   end
@@ -431,56 +461,143 @@ local function same(a, b)
   return table.concat(a, "\n") == table.concat(b, "\n")
 end
 
+-- Whether the backend says which comments are mine, and my username (nil
+-- when it does but none is: then every comment is someone else's).
+---@return boolean known
+---@return string? me
+local function identity(threads)
+  local known, me = false, nil
+  for _, t in ipairs(threads) do
+    for _, c in ipairs(t.comments or {}) do
+      if type(c.mine) == "boolean" then known = true end
+      if c.mine == true then me = c.author end
+    end
+  end
+  return known, me
+end
+
+-- The conversation (head and quoted cache, as written by thread_lines)
+-- without the comments of *me*, to tell someone else's activity from mine.
+-- A body line that itself reads as `@user: ` splits a comment, the same way
+-- on both sides of a comparison.
+local function others_text(head, quoted, me)
+  local out, skip = {}, false
+  local function add(l, first)
+    local who = l:match("^@([%w._-]+):%s") or l:match("^@([%w._-]+):$")
+    if who or first then skip = me ~= nil and who == me end
+    if not skip then table.insert(out, l) end
+  end
+  add(head, true)
+  for _, q in ipairs(quoted) do
+    add((q:gsub("^>%s?", "")), false)
+  end
+  return table.concat(out, "\n")
+end
+
 ---@class review_notes.Thread
 ---@field id string
----@field path string
----@field line integer
+---@field path string? nil (JSON null) for a thread on the whole change
+---@field line integer? last line (where the remote anchors a range)
+---@field start_line integer? first line of a multi-line comment
 ---@field resolved boolean
----@field comments { author: string, body: string }[]
+---@field resolvable boolean? false for a one-off comment, which has no resolved state on the remote
+---@field resolved_by string? who resolved it, when known
+---@field resolved_by_me boolean? whether I did (in the browser too), when known
+---@field comments { author: string, body: string, mine: boolean? }[]
 
 --- Merge remote threads into the notes: remote wins. A known thread gets its
---- quoted block and [resolved] state rewritten (my lines stay) and is flagged
---- [new] when its comments changed; an unknown thread is appended as an
---- entry. Entries whose id is gone from the remote are left alone. A resolved
---- thread is never flagged, and `opts.quiet` flags nothing: used for the pull
---- right after a push, so what I just sent does not come back as new (a
---- draft's id is not the thread's id, so threads cannot be told apart).
+--- quoted block and [resolved] state rewritten (my lines stay), except a
+--- resolve or reopen of mine not sent yet (the tag differs from the last
+--- remote state), and is flagged [new] when its comments changed while it is
+--- open on either side (push then holds my unsent resolve or reopen back
+--- until I read what came in); it keeps its line, which follows my edits,
+--- but takes the remote's location when that is another file or none (the
+--- file had it wrong: written by hand, an older format, a rename). An unknown
+--- thread is added as an entry. A thread gone from the remote is dropped,
+--- unless it has unsent lines of mine: those stay, reported as `gone`. A one-off
+--- comment (not resolvable) keeps the resolved state I gave it, since the
+--- remote has none; the remote's guess only applies when it is new.
+---
+--- When the backend says which comments are mine (`mine`), only someone
+--- else's comments count as a change, so mine (sent by push or written in the
+--- browser) never flag a thread, and a resolve by someone else
+--- (`resolved_by_me == false`) flags it too: a claim to check. Otherwise a
+--- resolved thread is never flagged, and `opts.quiet` flags nothing: used for
+--- the pull right after a push, so what I just sent does not come back as new
+--- (a draft's id is not the thread's id, so threads cannot be told apart).
+--- With `mine`, `opts.quiet` is not needed and ignored.
 ---@param threads review_notes.Thread[]
 ---@param opts { quiet: boolean? }?
 ---@return string[] lines
----@return { added: integer, updated: integer, new: integer } stats
+---@return { added: integer, updated: integer, new: integer, removed: integer, gone: integer } stats
 function M.merge(lines, threads, opts)
-  local quiet = opts and opts.quiet
+  local known, me = identity(threads)
+  local quiet = opts and opts.quiet and not known
   local by_id = {}
   for _, e in ipairs(M.parse(lines)) do
     if e.id then by_id[e.id] = e end
   end
-  local stats = { added = 0, updated = 0, new = 0 }
-  local edits, appended = {}, {}
+  local stats = { added = 0, updated = 0, new = 0, removed = 0, gone = 0 }
+  local edits, appended, seen = {}, {}, {}
   for _, t in ipairs(threads) do
     local head, quoted = M.thread_lines(t)
-    local flag = not t.resolved and not quiet
     local e = by_id[t.id]
+    seen[t.id] = true
+    local path = t.path ~= vim.NIL and t.path or nil
+    local start = t.start_line ~= vim.NIL and t.start_line or nil
+    local first, last = path and tostring(t.line or 0), nil
+    if path and start and start < (t.line or 0) then first, last = tostring(start), tostring(t.line) end
+    local resolved, remote = t.resolved, t.resolved
+    if e and t.resolvable == false then
+      resolved, remote = e.resolved, e.resolved
+    elseif e and e.resolved ~= e.remote_resolved then
+      -- Unsent: either the remote is as before, or it already agrees.
+      resolved = e.resolved
+    end
+    -- Open on either side: a reply there is something to read before my
+    -- unsent resolve or reopen goes out.
+    local open = not resolved or (t.resolvable ~= false and not t.resolved)
+    local flag = open and not quiet
     if e then
       local changed = e.head ~= head or not same(e.quoted, quoted)
+      if changed and known then changed = others_text(e.head, e.quoted, me) ~= others_text(head, quoted, me) end
+      -- Resolved since the last pull by someone else, over my open thread.
+      local claim = t.resolvable ~= false and t.resolved and not e.remote_resolved and not e.resolved
+        and t.resolved_by_me == false and type(t.resolved_by) == "string"
       local before = table.concat(render(e), "\n")
-      e.head, e.quoted, e.resolved, e.remote_resolved = head, quoted, t.resolved, t.resolved
-      if changed and flag then
+      e.head, e.quoted, e.resolved, e.remote_resolved = head, quoted, resolved, remote
+      if e.path ~= path then
+        local moved = new_entry(0, "", path, first, last, "")
+        e.general, e.path, e.line, e.end_line, e.loc = moved.general, moved.path, moved.line, moved.end_line, moved.loc
+      end
+      if (changed and flag) or claim then
         e.new = true
         stats.new = stats.new + 1
       end
       local block = render(e)
-      if table.concat(block, "\n") ~= before then
+      -- The head as written may differ from its rendering (an older format).
+      if table.concat(block, "\n") ~= before or lines[e.src] ~= block[1] then
         stats.updated = stats.updated + 1
         table.insert(edits, { first = e.src, last = e.last, lines = block })
       end
     else
-      local fresh = new_entry(0, "", t.path, tostring(t.line), nil, head)
+      if known and others_text(head, quoted, me) == "" then flag = false end
+      local fresh = new_entry(0, "", path, first, last, head)
       fresh.id, fresh.resolved, fresh.remote_resolved = t.id, t.resolved, t.resolved
       fresh.quoted, fresh.mine, fresh.new = quoted, {}, flag
       if flag then stats.new = stats.new + 1 end
       stats.added = stats.added + 1
       table.insert(appended, render(fresh))
+    end
+  end
+  for id, e in pairs(by_id) do
+    if not seen[id] then
+      if #e.mine > 0 then
+        stats.gone = stats.gone + 1
+      else
+        stats.removed = stats.removed + 1
+        table.insert(edits, { first = e.src, last = e.last, lines = {} })
+      end
     end
   end
   table.sort(edits, function(a, b) return a.first > b.first end)
@@ -492,7 +609,71 @@ function M.merge(lines, threads, opts)
     if #out > 0 then table.insert(out, "") end
     vim.list_extend(out, block)
   end
-  return out, stats
+  return M.sort(tidy(out)), stats
+end
+
+-- Where an entry goes in a sorted file: general entries first, then by path
+-- and line; the file order breaks ties.
+local function before(a, b)
+  if a.general ~= b.general then return a.general end
+  if not a.general then
+    if a.path ~= b.path then return a.path < b.path end
+    if a.line ~= b.line then return a.line < b.line end
+    local ae, be = a.end_line or a.line, b.end_line or b.line
+    if ae ~= be then return ae < be end
+  end
+  return a.src < b.src
+end
+
+--- Put the entries in order (see `before`), each moved as a block with the
+--- comment lines after it. A file already in order is returned as it is.
+---@param lines string[]
+---@return string[]
+function M.sort(lines)
+  local entries = M.parse(lines)
+  local sorted = vim.list_extend({}, entries)
+  table.sort(sorted, before)
+  local moved = false
+  for i, e in ipairs(sorted) do
+    if e ~= entries[i] then moved = true end
+  end
+  if not moved then return lines end
+  local next_src = {}
+  for i, e in ipairs(entries) do
+    next_src[e] = entries[i + 1] and entries[i + 1].src or #lines + 1
+  end
+  local out = vim.list_slice(lines, 1, entries[1].src - 1)
+  for _, e in ipairs(sorted) do
+    while #out > 0 and not out[#out]:match("%S") do table.remove(out) end
+    if #out > 0 then table.insert(out, "") end
+    vim.list_extend(out, vim.list_slice(lines, e.src, next_src[e] - 1))
+  end
+  return tidy(out)
+end
+
+--- Add the entry *entry* (lines from `new_entry_lines`): a general one after
+--- the last general entry, any other at the end.
+---@param entry string[]
+---@param general boolean
+---@return string[]
+function M.add_entry(lines, entry, general)
+  local out = vim.deepcopy(lines)
+  local at = #out + 1
+  if general then
+    at = 1
+    for _, e in ipairs(M.parse(lines)) do
+      if e.general then
+        at = e.last + 1
+      elseif at == 1 then
+        at = e.src
+        break
+      end
+    end
+  end
+  local block = vim.list_extend({}, entry)
+  if at > 1 and (out[at - 1] or ""):match("%S") then table.insert(block, 1, "") end
+  if at <= #out and out[at]:match("%S") then table.insert(block, "") end
+  return tidy(splice(out, at, at - 1, block))
 end
 
 ---@class review_notes.Plan
@@ -500,17 +681,25 @@ end
 ---@field replies review_notes.Entry[] threads with a reply of mine (`send` has the text)
 ---@field states review_notes.Entry[] threads whose resolved tag differs from the remote
 ---@field drafts integer open [draft] entries, which are never sent
----@field summary string
+---@field held integer entries tagged new with something to send, held back until read
+
+-- Whether *e* has something a push would send.
+local function has_changes(e)
+  if e.id then return #e.mine > 0 or e.resolved ~= e.remote_resolved end
+  return not e.resolved and vim.trim(e.head .. "\n" .. M.my_text(e.mine)) ~= ""
+end
 
 --- What a push would send.
 ---@return review_notes.Plan
 function M.plan(lines)
-  local plan = { new = {}, replies = {}, states = {}, drafts = 0, summary = (M.summary(lines)) }
+  local plan = { new = {}, replies = {}, states = {}, drafts = 0, held = 0 }
   for _, e in ipairs(M.parse(lines)) do
-    if vim.startswith(e.path, "/") then
+    if e.path and vim.startswith(e.path, "/") then
       -- not a repo path: nothing GitLab could anchor it to
     elseif e.draft then
       if not e.resolved then plan.drafts = plan.drafts + 1 end
+    elseif e.new then
+      if has_changes(e) then plan.held = plan.held + 1 end
     elseif not e.id then
       if not e.resolved then
         e.send = vim.trim(e.head .. "\n" .. M.my_text(e.mine))
@@ -537,15 +726,26 @@ function M.describe(plan)
   if #plan.new > 0 then table.insert(parts, count(#plan.new, "new thread", "new threads")) end
   if #plan.replies > 0 then table.insert(parts, count(#plan.replies, "reply", "replies")) end
   if #plan.states > 0 then table.insert(parts, count(#plan.states, "state change", "state changes")) end
-  if plan.summary ~= "" then table.insert(parts, "summary") end
   if #parts == 0 then return nil end
   return table.concat(parts, ", ")
 end
 
---- Remove what was sent from the notes: new entries go (pull brings them back
---- as threads), replies lose my lines, the summary goes.
+--- What a push leaves out (drafts, [new] entries), as " (...)", or "".
 ---@param plan review_notes.Plan
----@param ok { new: table<table, boolean>, replies: table<table, boolean>, summary: boolean }
+---@return string
+function M.describe_skipped(plan)
+  local parts = {}
+  if plan.drafts > 0 then table.insert(parts, count(plan.drafts, "draft", "drafts") .. " not sent") end
+  if plan.held > 0 then
+    table.insert(parts, count(plan.held, "[new] entry", "[new] entries") .. " held back until read")
+  end
+  return #parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or ""
+end
+
+--- Remove what was sent from the notes: new entries go (pull brings them back
+--- as threads), replies lose my lines.
+---@param plan review_notes.Plan
+---@param ok { new: table<table, boolean>, replies: table<table, boolean> }
 ---@return string[]
 function M.apply_sent(lines, plan, ok)
   local ops, used = {}, {}
@@ -567,14 +767,6 @@ function M.apply_sent(lines, plan, ok)
     if i then
       local copy = vim.tbl_extend("force", e, { mine = {} })
       table.insert(ops, { first = i, last = i + e.last - e.src, lines = render(copy) })
-    end
-  end
-  if ok.summary then
-    local text, idx = M.summary(lines)
-    if text == plan.summary then
-      for _, i in ipairs(idx) do
-        table.insert(ops, { first = i, last = i, lines = {} })
-      end
     end
   end
   table.sort(ops, function(a, b) return a.first > b.first end)
