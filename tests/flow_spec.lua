@@ -1,46 +1,55 @@
 local review = require("review_notes")
+local store = require("review_notes.store")
 
 local fixtures = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h") .. "/fixtures"
 local script = fixtures .. "/backend.sh"
-
 local function cmd(...) return { script, ... } end
-
 local function wait_for(cond, what)
   assert.is_true(vim.wait(5000, cond, 20), "timed out waiting for " .. what)
 end
 
-describe("pull and push", function()
+describe("pull and publish", function()
   local repo, log, threads_file, notes_path, restore
 
-  local function read(path)
-    return vim.fn.filereadable(path) == 1 and vim.fn.readfile(path) or {}
+  local function read(path) return vim.fn.filereadable(path) == 1 and vim.fn.readfile(path) or {} end
+  local function doc() return store.parse(read(notes_path)) end
+  local function calls() return read(log) end
+  local function write_threads(list) vim.fn.writefile({ vim.json.encode(list) }, threads_file) end
+  local function write_after(list) vim.fn.writefile({ vim.json.encode(list) }, threads_file .. ".after") end
+  local function remote(id, path, line, ...)
+    local comments = {}
+    for i, c in ipairs({ ... }) do
+      table.insert(comments, { id = id .. "-" .. i, author = c[1], body = c[2], mine = c[1] == "me" })
+    end
+    return { id = id, path = path, line = line, resolved = false, comments = comments }
   end
 
   before_each(function()
-    vim.wait(100) -- let a previous spec's trailing pull finish
+    vim.wait(100)
     repo = vim.fn.tempname()
     vim.fn.mkdir(repo, "p")
     vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
     vim.fn.writefile({ "x" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
     notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-      .. "/main.txt"
-    log = repo .. "/calls.log"
-    threads_file = repo .. "/threads.json"
+      .. "/main.md"
+    log, threads_file = repo .. "/calls.log", repo .. "/threads.json"
     vim.fn.writefile({ "[]" }, threads_file)
     vim.env.FAKE_LOG, vim.env.FAKE_THREADS = log, threads_file
-    review.config.backend = {
-      threads = cmd("threads"),
-      add = cmd("add", "{path}:{line}", "-"),
-      general = cmd("general", "-"),
-      reply = cmd("reply", "{thread}", "-"),
-      resolve = cmd("resolve", "{thread}"),
-      unresolve = cmd("unresolve", "{thread}"),
-      submit = cmd("submit", "{ids}"),
-      discard = cmd("discard", "{ids}"),
-    }
+    review.setup({
+      backend = {
+        threads = cmd("threads"),
+        add = cmd("add", "{path}:{line}", "-"),
+        general = cmd("general", "-"),
+        reply = cmd("reply", "{thread}", "-"),
+        resolve = cmd("resolve", "{thread}"),
+        unresolve = cmd("unresolve", "{thread}"),
+        submit = cmd("submit", "{ids}"),
+        discard = cmd("discard", "{ids}"),
+      },
+    })
     local select = vim.ui.select
-    vim.ui.select = function(_, _, on_choice) on_choice("Send") end
+    vim.ui.select = function(items, _, on_choice) on_choice(items[1]) end
     restore = function() vim.ui.select = select end
   end)
 
@@ -49,542 +58,88 @@ describe("pull and push", function()
     vim.fn.delete(repo, "rf")
   end)
 
-  local function write_threads(list) vim.fn.writefile({ vim.json.encode(list) }, threads_file) end
-  -- What the remote reports once something was sent.
-  local function write_after(list) vim.fn.writefile({ vim.json.encode(list) }, threads_file .. ".after") end
-
-  it("pull writes remote threads into the notes, flagged new", function()
-    write_threads({ { id = "t1", path = "a.c", line = 1, resolved = false, comments = { { author = "al", body = "why?" } } } })
+  it("pull writes remote threads into the notes, the change ones too, and sends nothing", function()
+    write_threads({ remote("t1", "a.c", 1, { "al", "why?" }), remote("g1", nil, nil, { "bo", "overall" }) })
     review.pull()
     wait_for(function() return #read(notes_path) > 0 end, "pull")
-    assert.are.same({ "a.c:1: [id:t1] [new] @al: why?" }, read(notes_path))
+    local d = doc()
+    assert.are.equal(2, #d.threads)
+    assert.are.same({}, d.threads[1].anchor)
+    assert.are.same({ "threads" }, calls())
+  end)
+
+  it("pull keeps my unpublished text, even with new remote comments", function()
+    write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
+    review.pull()
+    wait_for(function() return #read(notes_path) > 0 end, "pull")
+    store.update(notes_path, function(d) table.insert(d.threads[1].comments, { source = "local", body = "because" }) end)
+    write_threads({ remote("t1", "a.c", 1, { "al", "why?" }, { "bo", "me too" }) })
+    review.pull()
+    wait_for(function() return #doc().threads[1].comments == 3 end, "second pull")
+    local c = doc().threads[1].comments
+    assert.are.same({ "remote", "remote", "local" }, { c[1].source, c[2].source, c[3].source })
+    assert.are.same({ "threads", "threads" }, calls())
   end)
 
   it("pull reports a failing backend and leaves the notes alone", function()
     review.config.backend.threads = cmd("fail")
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: mine" }, notes_path)
+    vim.fn.writefile({ "## a.c:1", "status: open", "", "### me (local)", "mine" }, notes_path)
+    local before = read(notes_path)
     review.pull()
-    vim.wait(500)
-    assert.are.same({ "a.c:1: mine" }, read(notes_path))
-  end)
-
-  it("push sends notes, replies and state, then syncs", function()
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({
-      "Overall fine.",
-      "",
-      "a.c:1: a new note",
-      "a.c:1: [draft] held back",
-      "a.c:1: [id:t1] @al: why?",
-      "  my reply",
-    }, notes_path)
-    write_threads({ { id = "t1", path = "a.c", line = 1, resolved = false, comments = { { author = "al", body = "why?" } } } })
-    write_after({
-      { id = "n1", path = "a.c", line = 1, resolved = false, comments = { { author = "me", body = "a new note" } } },
-      { id = "g1", path = vim.NIL, resolved = false, comments = { { author = "me", body = "Overall fine." } } },
-      { id = "t1", path = "a.c", line = 1, resolved = false,
-        comments = { { author = "al", body = "why?" }, { author = "me", body = "my reply" } } },
-    })
-    review.push()
-    -- Done once the final pull has written the remote's version of the thread.
-    wait_for(function() return table.concat(read(notes_path), "\n"):find("[id:n1]", 1, true) end, "push")
-    local calls = table.concat(read(log), "\n")
-    assert.is_truthy(calls:find("add a.c:1 -\nstdin: a new note", 1, true))
-    assert.is_truthy(calls:find("reply t1 -\nstdin: my reply", 1, true))
-    assert.is_truthy(calls:find("general -\nstdin: Overall fine.", 1, true))
-    assert.is_nil(calls:find("held back", 1, true))
-    -- Sent entries are gone, replaced by what the remote now has, unflagged.
-    local out = table.concat(read(notes_path), "\n")
-    assert.is_nil(out:find("[new]", 1, true))
-    assert.is_truthy(out:find("a.c:1: [draft] held back", 1, true))
-    assert.is_truthy(out:find("[id:n1] @me: a new note", 1, true))
-    assert.is_truthy(out:find("> @me: my reply", 1, true))
-    assert.is_truthy(vim.startswith(out, "[id:g1] @me: Overall fine."))
-  end)
-
-  it("sync keeps a local resolve through its first pull and sends it", function()
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: [resolved] [id:t1] @al: why?" }, notes_path)
-    write_threads({ { id = "t1", path = "a.c", line = 1, resolved = false, comments = { { author = "al", body = "why?" } } } })
-    write_after({ { id = "t1", path = "a.c", line = 1, resolved = true, comments = { { author = "al", body = "why?" } } } })
-    review.sync()
-    wait_for(function() return table.concat(read(notes_path), "\n"):find("> (resolved)", 1, true) end, "pull")
-    local calls = read(log)
-    assert.are.same({ "threads", "resolve t1", "threads" }, calls)
-    assert.are.same({ "a.c:1: [resolved] [id:t1] @al: why?", "  > (resolved)" }, read(notes_path))
-  end)
-
-  it("sync sends nothing when the push is cancelled", function()
-    vim.ui.select = function(_, _, on_choice) on_choice("Cancel") end
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: [resolved] [id:t1] @al: why?" }, notes_path)
-    write_threads({ { id = "t1", path = "a.c", line = 1, resolved = false, comments = { { author = "al", body = "why?" } } } })
-    review.sync()
-    vim.wait(500)
-    assert.are.same({ "threads" }, read(log))
-    assert.are.same({ "a.c:1: [resolved] [id:t1] @al: why?" }, read(notes_path))
-  end)
-
-  it("push holds back a thread answered on the remote since the last pull", function()
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: [resolved] [id:t1] @al: why?", "", "a.c:1: [id:t2] @al: and this?", "  my reply" }, notes_path)
-    write_threads({
-      { id = "t1", path = "a.c", line = 1, resolved = false,
-        comments = { { author = "al", body = "why?" }, { author = "bo", body = "wait, still broken" } } },
-      { id = "t2", path = "a.c", line = 1, resolved = false,
-        comments = { { author = "al", body = "and this?" }, { author = "al", body = "never mind" } } },
-    })
-    review.push()
-    wait_for(function() return table.concat(read(notes_path), "\n"):find("[new]", 1, true) end, "pull")
-    vim.wait(300)
-    assert.are.same({ "threads" }, read(log))
-    assert.are.same({
-      "a.c:1: [resolved] [id:t1] [new] @al: why?",
-      "  > @bo: wait, still broken",
-      "",
-      "a.c:1: [id:t2] [new] @al: and this?",
-      "  > @al: never mind",
-      "  my reply",
-    }, read(notes_path))
-  end)
-
-  it("sync with nothing to send only pulls", function()
-    write_threads({})
-    review.sync()
-    wait_for(function() return #read(log) > 0 end, "pull " .. log .. " cwd=" .. vim.fn.getcwd())
     vim.wait(400)
-    assert.are.same({ "threads" }, read(log))
+    assert.are.same(before, read(notes_path))
   end)
 
-  it("push changes thread state after publishing", function()
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: [resolved] [id:t1] @al: why?", "  my reply" }, notes_path)
-    write_threads({ { id = "t1", path = "a.c", line = 1, resolved = false, comments = { { author = "al", body = "why?" } } } })
-    review.push()
-    wait_for(function() return table.concat(read(log), "\n"):find("resolve t1", 1, true) end, "resolve")
-    local calls = table.concat(read(log), "\n")
-    assert.is_true(calls:find("submit d1", 1, true) < calls:find("resolve t1", 1, true))
-  end)
-
-  it("push publishes only the drafts it queued", function()
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: first", "", "a.c:1: second" }, notes_path)
-    review.push()
-    wait_for(function() return table.concat(read(log), "\n"):find("submit", 1, true) end, "submit")
-    local calls = table.concat(read(log), "\n")
-    assert.is_truthy(calls:find("submit d1,d2", 1, true))
-    assert.is_nil(calls:find("discard", 1, true))
-  end)
-
-  it("push keeps what a failing submit did not publish and discards only that", function()
-    review.config.backend.submit = cmd("partial", "{ids}")
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: first", "", "a.c:1: second" }, notes_path)
-    review.push()
-    wait_for(function() return table.concat(read(log), "\n"):find("discard", 1, true) end, "discard")
-    vim.wait(300)
-    local calls = table.concat(read(log), "\n")
-    assert.is_truthy(calls:find("discard d2", 1, true))
-    assert.are.same({ "a.c:1: second" }, read(notes_path))
-  end)
-
-  it("push keeps failed entries and discards the queue when submit fails", function()
-    review.config.backend.submit = cmd("fail", "{ids}")
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: a new note" }, notes_path)
-    review.push()
-    wait_for(function() return table.concat(read(log), "\n"):find("discard d1", 1, true) end, "discard")
-    vim.wait(300)
-    assert.are.same({ "a.c:1: a new note" }, read(notes_path))
-  end)
-
-  it("push with nothing to send only pulls", function()
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-    vim.fn.writefile({ "a.c:1: [draft] later" }, notes_path)
-    review.push()
-    vim.wait(300)
-    assert.are.same({ "threads" }, read(log))
-  end)
-end)
-
-describe("picker", function()
-  local repo, restore
-
-  before_each(function()
-    -- A buffer left over from another spec would point at a deleted repo.
-    vim.cmd("silent! %bwipeout!")
-    repo = vim.fn.tempname()
-    vim.fn.mkdir(repo, "p")
-    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
-    vim.fn.writefile({ "one", "two" }, repo .. "/a.c")
-    vim.cmd("cd " .. repo)
-    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-    vim.fn.mkdir(dir, "p")
-    vim.fn.writefile({ "a.c:2: [draft] second line", "a.c:1: [resolved] first" }, dir .. "/main.txt")
-    restore = function() end
-  end)
-
-  after_each(function()
-    restore()
-    vim.fn.delete(repo, "rf")
-  end)
-
-  it("lists notes as items, sorted by position, searchable by state", function()
-    local items = review.items()
-    assert.are.equal(2, #items)
-    assert.are.equal(1, items[1].line)
-    assert.is_truthy(items[1].text:find("resolved", 1, true))
-    assert.is_truthy(items[2].text:find("draft", 1, true))
-    assert.are.equal("second line", items[2].summary)
-  end)
-
-  it("shows a draft reply pi left on a resolved [new] thread", function()
-    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-    vim.fn.writefile({
-      "a.c:1: [resolved] [draft] [id:t1] [new] @al: q",
-      "  > @al: q",
-      "  fixed it",
-      "a.c:2: [resolved] [id:t2] @al: r",
-      "  my reply",
-    }, dir .. "/main.txt")
-    local items = review.items()
-    assert.are.same({ "new", "draft", "resolved" }, items[1].tags)
-    assert.are.same({ "resolved", "unsent" }, items[2].tags)
-    assert.are.equal("ReviewText", items[1].summary_hl)
-    vim.cmd("edit a.c")
-    review.refresh()
-    assert.is_truthy(review.status():find(review.style.draft.icon .. " 1", 1, true))
-  end)
-
-  it("marks a new item as read, keeping its state", function()
-    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-    vim.fn.writefile({ "a.c:1: [resolved] [new] first" }, dir .. "/main.txt")
-    review.item_action(review.items()[1], "read")
-    assert.are.same({ "a.c:1: [resolved] first" }, vim.fn.readfile(dir .. "/main.txt"))
-  end)
-
-  it("opens an item at its icon line", function()
-    review.goto_item(review.items()[2])
-    assert.are.equal(2, vim.fn.line("."))
-  end)
-
-  it("opens a note on the whole change at its entry, a file note at line 1", function()
-    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-    vim.fn.writefile({ "a.c:0: whole file", "", "whole change" }, dir .. "/main.txt")
-    local items = review.items()
-    assert.is_true(items[1].note.e.general)
-    review.goto_item(items[1])
-    assert.are.equal(dir .. "/main.txt", vim.api.nvim_buf_get_name(0))
-    assert.are.equal(3, vim.fn.line("."))
-    vim.cmd("close")
-    review.goto_item(items[2])
-    assert.are.equal(repo .. "/a.c", vim.api.nvim_buf_get_name(0))
-    assert.are.equal(1, vim.fn.line("."))
-  end)
-end)
-
-describe("status", function()
-  local repo
-
-  before_each(function()
-    vim.cmd("silent! %bwipeout!")
-    repo = vim.fn.tempname()
-    vim.fn.mkdir(repo, "p")
-    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
-    vim.fn.writefile({ "one", "two" }, repo .. "/a.c")
-    vim.cmd("cd " .. repo)
-    vim.cmd("edit a.c")
-  end)
-
-  after_each(function() vim.fn.delete(repo, "rf") end)
-
-  local function write_notes(lines)
-    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-    vim.fn.mkdir(dir, "p")
-    vim.fn.writefile(lines, dir .. "/main.txt")
-  end
-
-  it("counts what a push would send, and not drafts", function()
-    write_notes({
-      "a.c:1: a new note",
-      "a.c:2: [draft] held back",
-      "a.c:1: [id:t1] @al: why?",
-      "  my reply",
-      "a.c:2: [resolved] [id:t2] @al: done",
+  it("publish sends new threads, replies and resolves, once, then pulls", function()
+    write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
+    review.pull()
+    wait_for(function() return #read(notes_path) > 0 end, "pull")
+    store.update(notes_path, function(d)
+      table.insert(d.threads[1].comments, { source = "local", body = "because" })
+      d.threads[1].status = "resolved"
+      table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "local", body = "new" } } })
+      table.insert(d.threads, { anchor = {}, status = "open", comments = { { source = "local", body = "overall" } } })
+    end)
+    write_after({
+      remote("t1", "a.c", 1, { "al", "why?" }, { "me", "because" }),
+      remote("n1", "a.c", 1, { "me", "new" }),
+      remote("n2", nil, nil, { "me", "overall" }),
     })
-    review.refresh()
-    local status = review.status()
-    -- a new thread, a reply and a resolve
-    assert.is_truthy(status:find(review.style.send.icon .. " 3", 1, true))
-  end)
-
-  it("shows nothing to send when everything is in sync", function()
-    write_notes({ "a.c:1: [id:t1] @al: why?", "  > @bo: +1" })
-    review.refresh()
-    assert.is_nil(review.status():find(review.style.send.icon, 1, true))
-  end)
-end)
-
-describe("note float", function()
-  local repo, notes_path
-
-  before_each(function()
-    vim.cmd("silent! %bwipeout!")
-    repo = vim.fn.tempname()
-    vim.fn.mkdir(repo, "p")
-    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
-    vim.fn.writefile({ "one", "two", "three" }, repo .. "/a.c")
-    vim.cmd("cd " .. repo)
-    vim.cmd("edit a.c")
-    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-      .. "/main.txt"
-    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
-  end)
-
-  after_each(function()
-    vim.cmd("silent! %bwipeout!")
-    vim.fn.delete(repo, "rf")
-  end)
-
-  local function read() return vim.fn.filereadable(notes_path) == 1 and vim.fn.readfile(notes_path) or {} end
-  local function floats()
-    return vim.tbl_filter(function(w) return vim.api.nvim_win_get_config(w).relative ~= "" end, vim.api.nvim_list_wins())
-  end
-  local function lines() return vim.api.nvim_buf_get_lines(0, 0, -1, false) end
-  -- Replace my turn (everything below `---`, or the whole buffer).
-  local function type_reply(text)
-    vim.cmd.stopinsert()
-    local all = lines()
-    local sep = 0
-    for i, l in ipairs(all) do
-      if l == "---" then sep = i end
-    end
-    vim.api.nvim_buf_set_lines(0, sep, -1, false, text)
-  end
-  local function press(k) vim.api.nvim_feedkeys(vim.keycode(k), "x", false) end
-
-  it("adds a multiline note from the float", function()
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-    review.add()
-    assert.are.equal("markdown", vim.bo.filetype)
-    assert.are.equal(1, #floats())
-    assert.are.equal("review://a.c:2", vim.api.nvim_buf_get_name(0))
-    type_reply({ "first line", "", "  code()", "> not quoted" })
-    vim.cmd("write")
-    assert.are.same({ "a.c:2: first line", "", "    code()", "  \\> not quoted" }, read())
-    assert.is_false(vim.bo.modified)
-    press("q")
-    assert.are.equal(0, #floats())
-    assert.are.equal(vim.fn.bufnr(repo .. "/a.c"), vim.api.nvim_get_current_buf())
-  end)
-
-  it("keeps unsaved text when closed, and drops a note left empty", function()
-    review.add()
-    type_reply({ "half written" })
-    press("q")
-    assert.are.same({}, read())
-    review.add()
-    assert.are.same({ "half written" }, lines())
-    vim.cmd("write")
-    assert.are.same({ "a.c:1: half written" }, read())
-    press("q")
-    vim.api.nvim_win_set_cursor(0, { 3, 0 })
-    review.add()
-    press("q")
+    review.publish()
     wait_for(function()
-      return #vim.tbl_filter(function(b)
-        return vim.api.nvim_buf_get_name(b):find("review://a.c:3", 1, true) ~= nil
-      end, vim.api.nvim_list_bufs()) == 0
-    end, "the empty note to go")
+      local n = 0
+      for _, line in ipairs(calls()) do
+        if line:match("^threads") then n = n + 1 end
+      end
+      return n >= 3 and not table.concat(read(notes_path), "\n"):find("me %(local%)")
+    end, "publish")
+    local l = table.concat(calls(), "\n")
+    assert.truthy(l:find("general %-"))
+    assert.truthy(l:find("add a.c:1 %-"))
+    assert.truthy(l:find("reply t1 %-"))
+    assert.truthy(l:find("resolve t1"))
+    assert.truthy(l:find("submit d1,d2,d3"))
+    for _, t in ipairs(doc().threads) do
+      for _, c in ipairs(t.comments) do assert.are.equal("remote", c.source) end
+    end
   end)
 
-  it("shows the conversation above my turn and replies below it", function()
-    vim.fn.writefile({ "a.c:1: [new] [id:t1] @al: why?", "  > @bo: because", "  > more" }, notes_path)
-    review.refresh()
-    review.add()
-    assert.are.same({ "### @al", "why?", "", "### @bo", "because", "more", "", "---", "" }, lines())
-    assert.are.equal(9, vim.fn.line("."))
-    type_reply({ "fine" })
-    vim.cmd("write")
-    assert.are.same({ "a.c:1: [id:t1] @al: why?", "  > @bo: because", "  > more", "  fine" }, read())
-    assert.are.equal("fine", lines()[#lines()])
+  it("publish never sends proposed comments", function()
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({ "## a.c:1", "status: open", "", "### me (proposed)", "agent says" }, notes_path)
+    review.publish()
+    vim.wait(500)
+    assert.are.same({ "threads" }, calls())
+    assert.are.equal("proposed", doc().threads[1].comments[1].source)
   end)
 
-  it("edits my note, then replies after an answer", function()
-    vim.fn.writefile({ "a.c:1: [resolved] [new] mine", "  > @pi: done" }, notes_path)
-    review.refresh()
-    review.add()
-    assert.are.equal("", lines()[#lines()])
-    type_reply({ "not quite" })
-    vim.cmd("write")
-    assert.are.same({ "a.c:1: mine", "  > @pi: done", "  not quite" }, read())
-  end)
-
-  it("resolves, drafts and deletes from the float, which stays open", function()
-    vim.fn.writefile({ "a.c:1: mine" }, notes_path)
-    review.refresh()
-    review.add()
-    local win = vim.api.nvim_get_current_win()
-    press(review.keys.resolve)
-    assert.are.same({ "a.c:1: [resolved] mine" }, read())
-    assert.are.equal(win, vim.api.nvim_get_current_win())
-    press(review.keys.draft)
-    assert.are.same({ "a.c:1: [resolved] [draft] mine" }, read())
-    assert.is_truthy(vim.api.nvim_win_get_config(win).title[1][1]:find("draft", 1, true))
-    press(review.keys.delete)
-    assert.are.same({}, read())
-    assert.are.equal(0, #floats())
-  end)
-
-  it("goes to the next note, moving the code along", function()
-    vim.fn.writefile({ "a.c:1: first", "", "a.c:3: third" }, notes_path)
-    review.refresh()
-    review.add()
-    press(review.keys.next)
-    assert.are.equal("review://a.c:3", vim.api.nvim_buf_get_name(0))
-    assert.are.equal(1, #floats())
-    local code = vim.tbl_filter(function(w) return vim.api.nvim_win_get_config(w).relative == "" end, vim.api.nvim_list_wins())[1]
-    assert.are.equal(3, vim.api.nvim_win_get_cursor(code)[1])
-    press(review.keys.code)
-    assert.are.equal(0, #floats())
-    assert.are.equal(3, vim.fn.line("."))
-  end)
-end)
-
-describe("files outside git", function()
-  local dir, repo, doc
-
-  before_each(function()
-    vim.cmd("silent! %bwipeout!")
-    dir = vim.fn.tempname()
-    vim.fn.mkdir(dir, "p")
-    doc = dir .. "/doc.md"
-    vim.fn.writefile({ "# Title", "body", "end" }, doc)
-    repo = vim.fn.tempname()
-    vim.fn.mkdir(repo, "p")
-    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
-    vim.fn.writefile({ "one", "two" }, repo .. "/a.c")
-  end)
-
-  after_each(function()
-    vim.cmd("silent! %bwipeout!")
-    vim.fn.delete(dir, "rf")
-    vim.fn.delete(repo, "rf")
-  end)
-
-  local function type_and_write(lines)
-    vim.cmd.stopinsert()
-    vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
-    vim.cmd("write")
-  end
-
-  it("keeps notes in a sibling file, by file name", function()
-    vim.cmd("cd " .. dir)
-    vim.cmd("edit " .. doc)
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-    review.add()
-    type_and_write({ "reword this" })
-    vim.cmd("close")
-    assert.are.same({ "doc.md:2: reword this" }, vim.fn.readfile(doc .. ".notes"))
-    assert.is_truthy(review.status():find(review.style.note.icon .. " 1", 1, true))
-    local items = review.items()
-    assert.are.equal(1, #items)
-    assert.are.equal(doc, items[1].file)
-  end)
-
-  it("deletes the notes file once nothing is left in it", function()
-    vim.fn.writefile({ "doc.md:1: [resolved] done" }, doc .. ".notes")
-    vim.cmd("cd " .. dir)
-    vim.cmd("edit " .. doc)
-    review.clean()
-    assert.are.equal(0, vim.fn.filereadable(doc .. ".notes"))
-  end)
-
-  it("shows a git file and a file outside git side by side", function()
-    vim.fn.writefile({ "doc.md:1: on the doc" }, doc .. ".notes")
-    local gitnotes = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
-    vim.fn.mkdir(gitnotes, "p")
-    vim.fn.writefile({ "a.c:1: on the code", "a.c:2: [id:t] @al: x", "  my reply" }, gitnotes .. "/main.txt")
-    vim.cmd("cd " .. repo)
-    vim.cmd("edit a.c")
-    vim.cmd("edit " .. doc)
-    review.refresh()
-    assert.is_truthy(review.status():find(review.style.note.icon .. " 1", 1, true))
-    -- A local review has nothing to push.
-    assert.is_nil(review.status():find(review.style.send.icon, 1, true))
-    vim.cmd("edit " .. repo .. "/a.c")
-    local status = review.status()
-    assert.is_truthy(status:find(review.style.thread.icon .. " 1", 1, true))
-    assert.is_truthy(status:find(review.style.send.icon .. " 2", 1, true))
-  end)
-
-  it("opens the sibling notes file with its filetype", function()
-    vim.cmd("cd " .. dir)
-    vim.cmd("edit " .. doc)
-    review.open()
-    assert.are.equal(doc .. ".notes", vim.api.nvim_buf_get_name(0))
-    assert.are.equal("reviewnotes", vim.bo.filetype)
-  end)
-end)
-
-describe("after a pi round", function()
-  local dir, doc
-
-  before_each(function()
-    vim.cmd("silent! %bwipeout!")
-    dir = vim.fn.tempname()
-    vim.fn.mkdir(dir, "p")
-    doc = dir .. "/doc.md"
-    vim.fn.writefile({ "a", "b", "c", "d" }, doc)
-    vim.fn.writefile({
-      "doc.md:1: [resolved] [new] reworded?",
-      "  > @pi: reworded",
-      "doc.md:2: mine",
-      "doc.md:3: [draft] [new] why?",
-      "  > @pi: which way?",
-      "doc.md:4: [resolved] old",
-    }, doc .. ".notes")
-    vim.cmd("cd " .. dir)
-    vim.cmd("edit " .. doc)
-    review.refresh()
-  end)
-
-  after_each(function()
-    vim.cmd("silent! %bwipeout!")
-    vim.fn.delete(dir, "rf")
-  end)
-
-  it("counts what waits for me, including what pi resolved", function()
-    local status = review.status()
-    assert.is_truthy(status:find(review.style.new.icon .. " 2", 1, true))
-    assert.is_truthy(status:find(review.style.note.icon .. " 1", 1, true))
-  end)
-
-  it("goes through them with jump_new", function()
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-    review.jump_new(1)
-    assert.are.equal(3, vim.fn.line("."))
-    review.jump_new(1)
-    assert.are.equal(1, vim.fn.line("."))
-    review.jump_new(-1)
-    assert.are.equal(3, vim.fn.line("."))
-  end)
-
-  it("accepts a note pi resolved, then reopens it", function()
-    vim.api.nvim_win_set_cursor(0, { 1, 0 })
-    review.toggle_resolved()
-    assert.are.equal("doc.md:1: [resolved] reworded?", vim.fn.readfile(doc .. ".notes")[1])
-    review.toggle_resolved()
-    assert.are.equal("doc.md:1: reworded?", vim.fn.readfile(doc .. ".notes")[1])
-  end)
-
-  it("follows changes on disk", function()
-    local lines = vim.fn.readfile(doc .. ".notes")
-    lines[3] = "doc.md:2: [new] mine"
-    vim.fn.writefile(lines, doc .. ".notes")
-    assert.is_true(vim.wait(3000, function()
-      return review.status():find(review.style.new.icon .. " 3", 1, true) ~= nil
-    end, 50))
+  it("a failing submit leaves the text local and discards the queued drafts", function()
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({ "## a.c:1", "status: open", "", "### me (local)", "mine" }, notes_path)
+    review.config.backend.submit = cmd("fail", "{ids}")
+    review.publish()
+    wait_for(function() return table.concat(calls(), "\n"):find("discard d1") ~= nil end, "discard")
+    assert.are.equal("local", doc().threads[1].comments[1].source)
   end)
 end)

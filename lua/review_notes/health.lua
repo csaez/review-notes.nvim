@@ -26,13 +26,13 @@ function M.check()
       report(("%s: `%s` is not executable"):format(name, exe))
     end
   end
-  for _, name in ipairs({ "threads", "add", "reply", "resolve", "unresolve" }) do
+  for _, name in ipairs({ "threads", "add", "general", "reply", "resolve", "unresolve" }) do
     if not cmds[name] then health.error(("backend command `%s` is not configured"):format(name)) end
   end
   if not cmds.submit then
-    health.info("no `submit` command: notes are sent one by one")
+    health.info("no `submit` command: each comment is posted as soon as it is sent")
   elseif not require("review_notes.backend").uses(cmds, "submit", "ids") then
-    health.warn("`submit` takes no `{ids}`: a push publishes every pending draft, browser ones included")
+    health.warn("`submit` takes no `{ids}`: publish sends every pending draft, browser ones included")
   end
 end
 
