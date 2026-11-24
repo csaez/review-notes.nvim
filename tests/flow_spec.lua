@@ -68,6 +68,16 @@ describe("pull and publish", function()
     assert.are.same({ "threads" }, calls())
   end)
 
+  it("pull copes with JSON nulls, as git-lab prints them", function()
+    vim.fn.writefile({
+      '[{"id":"t1","path":"a.c","line":1,"start_line":null,"resolved":false,"resolved_by":null,"comments":[{"id":"1","author":"al","body":"x","mine":false}]},'
+        .. '{"id":"g1","path":null,"line":null,"start_line":null,"resolved":false,"comments":[{"id":"2","author":"bo","body":"y"}]}]',
+    }, threads_file)
+    review.pull()
+    wait_for(function() return #read(notes_path) > 0 end, "pull")
+    assert.are.equal(2, #doc().threads)
+  end)
+
   it("pull keeps my unpublished text, even with new remote comments", function()
     write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
     review.pull()

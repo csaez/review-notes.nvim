@@ -9,6 +9,14 @@ local M = {}
 ---@field stderr string
 ---@field json any? decoded stdout, when it is JSON (also on failure: a partial result)
 
+--- Resume *co*, reporting an error instead of losing it: a coroutine that
+--- fails after its first yield has no caller to raise to.
+---@param co thread
+function M.resume(co, ...)
+  local ok, err = coroutine.resume(co, ...)
+  if not ok then vim.notify("review: " .. tostring(err), vim.log.levels.ERROR) end
+end
+
 local function substitute(argv, vars)
   local out = {}
   for i, arg in ipairs(argv) do
@@ -34,7 +42,7 @@ function M.run(cmds, name, opts)
     text = true,
     stdin = opts.stdin or false,
   }, function(out)
-    vim.schedule(function() coroutine.resume(co, out) end)
+    vim.schedule(function() M.resume(co, out) end)
   end)
   if not started then
     return { ok = false, stdout = "", stderr = tostring(err) }
@@ -42,7 +50,8 @@ function M.run(cmds, name, opts)
   local out = coroutine.yield()
   local result = { ok = out.code == 0, stdout = out.stdout or "", stderr = vim.trim(out.stderr or "") }
   if vim.trim(result.stdout) ~= "" then
-    local decoded, json = pcall(vim.json.decode, result.stdout)
+    -- JSON null is nil, not vim.NIL, so callers can test fields with `or`.
+    local decoded, json = pcall(vim.json.decode, result.stdout, { luanil = { object = true, array = true } })
     if decoded then result.json = json end
   end
   return result

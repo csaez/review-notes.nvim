@@ -790,7 +790,7 @@ end
 local function choose(prompt, choices)
   local co = assert(coroutine.running())
   vim.ui.select(choices, { prompt = prompt }, function(choice)
-    vim.schedule(function() coroutine.resume(co, choice) end)
+    vim.schedule(function() backend.resume(co, choice) end)
   end)
   return coroutine.yield()
 end
