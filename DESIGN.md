@@ -1,6 +1,6 @@
 # review-notes.nvim v2: design
 
-Status: proposal, nothing implemented yet. Backward compatibility is not a
+Status: implemented on this branch (the README is the user documentation). Backward compatibility is not a
 goal: the file format, commands, keymaps and backend contract may all change.
 
 ## Problems with v1

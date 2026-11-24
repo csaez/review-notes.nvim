@@ -1,68 +1,59 @@
 /**
  * Review Notes Extension
  *
- *   /review [request] - Review code and append findings as [draft] notes to the
- *                       review notes file. The request is free text (scope, ticket,
- *                       focus, blast radius); depth follows the blast radius, and
- *                       risky changes pause for a go-ahead. Default scope =
- *                       uncommitted changes when there are any, else the branch
- *                       against its MR target.
- *   /fixup [scope]    - Address the open review notes (all, or those on the given
- *                       files/directories): notes on code become fixup! commits;
- *                       handled notes are resolved with a reply; unclear ones
- *                       get a question under them instead of a chat
- *                       round-trip, as [draft]. Requires no changes to
- *                       tracked files.
+ *   /review [request] - Review code and append findings as proposed comments
+ *                       to the review notes file. The request is free text (scope,
+ *                       ticket, focus, blast radius); depth follows the blast
+ *                       radius, and risky changes pause for a go-ahead. Default
+ *                       scope = uncommitted changes when there are any, else the
+ *                       branch against its MR target.
+ *   /fixup [scope]    - Address the open review threads (all, or those on the given
+ *                       files/directories): threads on code become fixup! commits;
+ *                       handled threads get a proposed reply and a resolve;
+ *                       unclear ones get a proposed question instead of a chat
+ *                       round-trip. Requires no changes to tracked files.
  *
  * Review notes, shared with the nvim plugin (review-notes.nvim, format in
- * lua/review_notes/notes.lua): code in a git worktree is reviewed in
- * $(git rev-parse --git-path review)/<branch>.txt, which the plugin syncs with
+ * lua/review_notes/store.lua): code in a git worktree is reviewed in
+ * $(git rev-parse --git-path review)/<branch>.md, which the plugin syncs with
  * the remote; any file outside git (e.g. a markdown draft) in a sibling
- * <file>.notes, local only. For a file outside git /review and /fixup take
- * the document (its path, its .notes file, or outside a repo a description of
- * it), and fixups are edits in place: there is no version control to commit to.
+ * <file>.review.md, local only. For a file outside git /review and /fixup
+ * take the document (its path, its .review.md file, or outside a repo a
+ * description of it), and fixups are edits in place: there is no version
+ * control to commit to.
+ *
+ * Everything pi writes is a `### me (proposed)` comment: the plugin never
+ * publishes it until the human approves it, so a round of pi can run at any
+ * time, even while peers comment. Resolving a thread is `status: resolved` on
+ * it, held back by the plugin until the proposed reply is approved.
  *
  * Handover rule: the human and the agent take turns on the same branch, and
  * commits are the only handover, so /fixup on code refuses to start on a dirty
  * tree and never mixes its edits with uncommitted human work.
- *
- * Entries pi adds or changes in a notes file are tagged [new] when the run
- * settles (by this extension, not the model), so the editor shows what to
- * look at after a round.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
-// Same entry syntax as the nvim plugin (notes.lua): a location, or none for a
-// general entry (about the whole change).
-const ENTRY_RE = /^([^\s#>:\\][^\s:]*):(\d+)(?:-(\d+))?:[ \t]?(.*)$/;
-
-interface NoteEntry {
-  path?: string; // none: a general entry
-  loc?: string; // "path:line" or "path:first-last", as written
-  text: string; // first line without tags
-  resolved: boolean;
-  draft: boolean; // not approved yet: never sent, never addressed
-  id?: string; // remote thread id
-  body: string[]; // indented lines without their two-space indent
+interface Comment {
+  who: string; // "@alice", "me (local)", "me (proposed)"
+  proposed: boolean; // written by a tool, waits for approval
+  mine: boolean; // mine, not published yet
+  body: string;
 }
 
-// Body lines lose exactly their two-space indent (code in a note keeps its own
-// indentation); hand-written lines with another indent are trimmed. Same rule
-// as notes.lua.
-const dedent = (line: string): string => {
-  const m = /^(?:  |\t)(.*)$/.exec(line);
-  return (m ? m[1]! : line.trim()).trimEnd();
-};
+interface Thread {
+  anchor: string; // "change", "path", "path:N" or "path:N-M", as written
+  path?: string; // none: the whole change
+  resolved: boolean;
+  id?: string; // remote thread id
+  comments: Comment[];
+}
 
-// Tags after the location (or at the start of a general entry), in any
-// order: [resolved] [draft] [id:X] [new].
-const TAG_RE = /^\[(resolved|draft|new|id:[^\]]+)\]\s*/;
-
+const HEADING_RE = /^(#{2,3})\s+(.*?)\s*(?:\{([^{}]*)\})?\s*$/;
 
 export default function reviewNotes(pi: ExtensionAPI) {
   const git = (cwd: string, ...args: string[]): string | undefined => {
@@ -128,7 +119,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
 
   const getNotesPath = (cwd: string): string | undefined => {
     const dir = git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "review");
-    return dir ? join(dir, `${getBranch(cwd) ?? "HEAD"}.txt`) : undefined;
+    return dir ? join(dir, `${getBranch(cwd) ?? "HEAD"}.md`) : undefined;
   };
 
   // ---------------------------------------------------------------------------
@@ -142,83 +133,57 @@ export default function reviewNotes(pi: ExtensionAPI) {
     }
   };
 
-  interface Head {
-    path?: string; // none: a general entry
-    loc?: string; // "path:line" or "path:first-last", as written
-    tags: string[]; // "resolved", "draft", "new", "id:X", in file order
-    text: string; // after the tags
-    tagsEnd: number; // offset in the line where the tags end
-  }
-
-  // The head of an entry: a location line, else (*general*) any line, whose
-  // leading `\\` escapes text that would read as a location or tag.
-  const parseHead = (line: string, general: boolean): Head | undefined => {
-    let m = ENTRY_RE.exec(line);
-    // `.:0:` is the old way of writing a general entry.
-    const old = m !== null && m[1] === "." && m[2] === "0" && !m[3];
-    if (old && !general) return undefined;
-    if (old) m = null;
-    if (!m && !general) return undefined;
-    let text = m ? m[4]! : old ? line.replace(/^\.:0:[ \t]?/, "") : line;
-    const tags: string[] = [];
-    for (let tag = TAG_RE.exec(text); tag; tag = TAG_RE.exec(text)) {
-      tags.push(tag[1]!);
-      text = text.slice(tag[0].length);
-    }
-    const tagsEnd = line.length - text.length;
-    if (!m) return { tags, text: text.replace(/^\\/, ""), tagsEnd };
-    const loc = `${m[1]}:${m[2]}${m[3] ? `-${m[3]}` : ""}`;
-    return { path: m[1]!, loc, tags, text, tagsEnd };
-  };
-
-  // Entries with their raw body lines (indented or blank), same scan as
-  // notes.lua: a `#` line ends the entry; any other unindented line starts
-  // one, except that the lines of a hand-written paragraph are one general
-  // note.
-  const parseEntries = (text: string): { index: number; head: Head; body: string[] }[] => {
-    const out: { index: number; head: Head; body: string[] }[] = [];
-    let cur: (typeof out)[number] | undefined;
-    let blank = false;
-    text.split("\n").forEach((line, index) => {
-      const located = parseHead(line, false);
-      if (located) {
-        cur = { index, head: located, body: [] };
-        out.push(cur);
-      } else if (cur && (/^\s/.test(line) || !line.trim())) {
-        cur.body.push(line);
-        if (!line.trim()) blank = true;
-        return;
-      } else if (line.startsWith("#")) {
-        cur = undefined;
-      } else if (cur && !cur.head.path && !cur.head.tags.some((t) => t.startsWith("id:")) && !blank && !line.startsWith("[")) {
-        cur.body.push(line);
-      } else {
-        cur = { index, head: parseHead(line, true)!, body: [] };
-        out.push(cur);
+  const parseThreads = (text: string): Thread[] => {
+    const out: Thread[] = [];
+    let thread: Thread | undefined;
+    let comment: Comment | undefined;
+    let sawStatus = false;
+    for (const line of text.split("\n")) {
+      const h = HEADING_RE.exec(line);
+      if (h && h[1] === "##") {
+        const anchor = h[2]!;
+        const attrs = h[3] ?? "";
+        thread = {
+          anchor,
+          path: anchor === "change" ? undefined : anchor.replace(/:\d+(-\d+)?$/, ""),
+          resolved: false,
+          id: /(?:^|\s)id=(\S+)/.exec(attrs)?.[1],
+          comments: [],
+        };
+        out.push(thread);
+        comment = undefined;
+        sawStatus = false;
+      } else if (h && h[1] === "###" && thread) {
+        const who = h[2]!;
+        comment = { who, proposed: who === "me (proposed)", mine: who === "me" || who === "me (local)", body: "" };
+        thread.comments.push(comment);
+      } else if (thread) {
+        const status = !comment && !sawStatus ? /^status:\s*(\w+)\s*$/.exec(line) : null;
+        if (status) {
+          thread.resolved = status[1] === "resolved";
+          sawStatus = true;
+        } else if (comment) {
+          comment.body += (comment.body ? "\n" : "") + line.replace(/^\\(\\*#)/, "$1");
+        } else if (line.trim()) {
+          // Bare text under a thread is one local comment, as in the plugin.
+          comment = { who: "me (local)", proposed: false, mine: true, body: line };
+          thread.comments.push(comment);
+        }
       }
-      blank = false;
-    });
+    }
+    for (const t of out) for (const c of t.comments) c.body = c.body.trim();
     return out;
   };
 
-  const readNotes = (notesFile: string): NoteEntry[] =>
-    parseEntries(readText(notesFile)).map(({ head, body }) => ({
-      path: head.path,
-      loc: head.loc,
-      text: head.text,
-      resolved: head.tags.includes("resolved"),
-      draft: head.tags.includes("draft"),
-      id: head.tags.find((t) => t.startsWith("id:"))?.slice(3),
-      body: body.filter((l) => l.trim()).map(dedent),
-    }));
+  const readThreads = (notesFile: string): Thread[] => parseThreads(readText(notesFile));
 
-  // Whatever pi writes on an open entry is [draft], so a [draft] entry waits
-  // for me and every other open entry is pi's: no turn tracking.
-  const needsPi = (n: NoteEntry): boolean => !n.resolved && !n.draft;
+  // A thread with a proposed comment waits for me; every other open thread is
+  // pi's: no turn tracking.
+  const needsPi = (t: Thread): boolean => !t.resolved && !t.comments.some((c) => c.proposed);
 
   // Scope: empty = everything, otherwise whitespace-separated files or
   // directories, relative to the cwd or absolute.
-  const inScope = (note: NoteEntry, scope: string, root: string, cwd: string): boolean => {
+  const inScope = (note: Thread, scope: string, root: string, cwd: string): boolean => {
     if (!scope) return true;
     return scope.split(/\s+/).some((raw) => {
       const tok = relative(root, resolve(cwd, expandHome(raw)));
@@ -227,9 +192,9 @@ export default function reviewNotes(pi: ExtensionAPI) {
     });
   };
 
-  const reportNothingForPi = (all: NoteEntry[], where: string, ctx: ExtensionCommandContext): void => {
-    const drafts = all.filter((n) => !n.resolved && n.draft).length;
-    const pending = drafts ? `: ${drafts} [draft] entr${drafts === 1 ? "y" : "ies"} to approve or resolve.` : ".";
+  const reportNothingForPi = (all: Thread[], where: string, ctx: ExtensionCommandContext): void => {
+    const waiting = all.filter((t) => !t.resolved && t.comments.some((c) => c.proposed)).length;
+    const pending = waiting ? `: ${waiting} thread${waiting === 1 ? "" : "s"} with proposed comments to approve.` : ".";
     ctx.ui.notify(`Nothing for pi ${where}${pending}`, "info");
   };
 
@@ -239,26 +204,28 @@ export default function reviewNotes(pi: ExtensionAPI) {
   // /fixup round, so the agent never interprets scopes or draft rules.
   // ---------------------------------------------------------------------------
   const NOTES_FORMAT =
-    "Notes format: an unindented line starts an entry; two-space-indented lines continue it. " +
-    "`path:line: text` or `path:first-last: text` is about code, `path:0: text` about a whole " +
-    "file; a line without a location is a general entry, about the whole change (a leading " +
-    "`\\` escapes text that would read as a location or tag). Tags come first: after the " +
-    "location, or at the start of a general entry, in this order: [resolved] [draft] [id:X] " +
-    "[new]. Body lines starting with `>` are replies from others (the remote, or yours as " +
-    "`> @pi:`); other body lines are mine (`\\>` is a literal `>`). `#` lines are comments. " +
-    "Never touch [new] tags.";
+    "Notes format: markdown. `## <anchor>` starts a thread: `change` is about the whole change, " +
+    "`path` a whole file, `path:N` or `path:N-M` code; a `{id=X}` after the anchor is a remote " +
+    "thread. The line after it is `status: open` or `status: resolved`. `### <who>` starts a " +
+    "comment: `### @alice` is a remote comment, `### me (local)` is mine (the human's) and not " +
+    "published yet, `### me (proposed)` is yours. Never edit `@author` comments, `me (local)` " +
+    "comments or `{id=...}` attributes. A body line that starts with `#` is written with a " +
+    "leading `\\`.";
 
-  const label = (n: NoteEntry): string => n.loc ?? `general: "${n.text.slice(0, 60)}"`;
+  const label = (t: Thread): string => {
+    const last = t.comments[t.comments.length - 1]?.body.split("\n")[0] ?? "";
+    return `${t.anchor}${last ? `: "${last.slice(0, 60)}"` : ""}`;
+  };
 
-  const onlyThese = (selected: NoteEntry[]): string =>
-    "Handle only these entries; leave all others as they are:\n" + selected.map((n) => `- ${label(n)}`).join("\n");
+  const onlyThese = (selected: Thread[]): string =>
+    "Handle only these threads; leave all others as they are:\n" + selected.map((t) => `- ${label(t)}`).join("\n");
 
   const RESOLVE_RULES = [
-    "Read every listed note and the general entries before changing anything.",
-    "My lines after a `> @pi:` line are my answer, or why I reopened the note.",
-    "Note handled: insert `[resolved] ` where the tags start and append `  > @pi: <what changed, one line>`.",
-    "Note unclear, or you disagree: change nothing, append `  > @pi: <question>`, insert `[draft] ` where the tags start, go on. Do not ask in the chat.",
-    "Keep every entry and their order.",
+    "Read every listed thread and the `change` threads before changing anything.",
+    "`me (local)` comments after your own proposed one are my answer, or why I reopened the thread.",
+    "Thread handled: append a `### me (proposed)` comment saying what changed (one line), and set `status: resolved`.",
+    "Thread unclear, or you disagree: change nothing else, append a `### me (proposed)` question, go on. Do not ask in the chat.",
+    "Keep every thread and their order.",
   ];
 
   const bullets = (lines: string[]): string => lines.map((l) => `- ${l}`).join("\n");
@@ -271,20 +238,20 @@ export default function reviewNotes(pi: ExtensionAPI) {
     (trigger ? "FIX and CHECK name the input, path or state that triggers the problem. " : "") +
     `${limit} Skip findings without a concrete action.`;
 
-  // [draft] keeps findings from being sent or fixed until the human approves
-  // them (removes the tag) or rejects them (resolves the entry).
-  const appendFindings = (notesFile: string, header: string[], path: string, rules: string[]): string =>
+  // Proposed comments are never published until the human approves them
+  // (`:Review approve`), or discards them, so every finding gets read against
+  // the code.
+  const appendFindings = (notesFile: string, path: string, rules: string[]): string =>
     `Append to \`${notesFile}\` (create it if missing). Never change existing content; skip ` +
-    "findings already in it, open or resolved. Shape:\n\n```\n" +
-    [...header, "# <2-3 lines of assessment>"].join("\n") +
-    `\n\n${path}:<line>: [draft] <TAG>: <actionable, 1-2 sentences>\n  <optional detail, two-space indent>\n\n` +
-    `${path}:<first>-<last>: [draft] <TAG>: <...>\n\n` +
-    `${path}:0: [draft] <TAG>: <about the whole file>\n\n` +
-    "[draft] <TAG>: <about the whole change: a general entry, no location>\n```\n\n" +
+    "findings already in it, open or resolved. One thread per finding, shape:\n\n```\n" +
+    `## ${path}:<line>\nstatus: open\n\n### me (proposed)\n<TAG>: <actionable, 1-2 sentences>\n<optional detail>\n\n` +
+    `## ${path}:<first>-<last>\nstatus: open\n\n### me (proposed)\n<TAG>: <...>\n\n` +
+    `## ${path}\nstatus: open\n\n### me (proposed)\n<TAG>: <about the whole file>\n\n` +
+    "## change\nstatus: open\n\n### me (proposed)\n<TAG>: <about the whole change>\n```\n\n" +
     bullets([
       ...rules,
-      "A finding about the whole change is a general entry, about a whole file `<path>:0`; never only in the `#` assessment.",
-      "Blank line between entries; every entry keeps [draft].",
+      "A finding about the whole change is a `change` thread, about a whole file a `<path>` thread. The assessment goes in your final message, not in the file.",
+      "Blank line between threads; every comment is `### me (proposed)`.",
     ]);
 
   const VERDICT = "<ready | minor fixes | needs changes | major concerns>";
@@ -293,7 +260,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
   // Documents outside git: sibling notes, and finding the document an argument
   // refers to.
   // ---------------------------------------------------------------------------
-  const NOTES_EXT = ".notes";
+  const NOTES_EXT = ".review.md";
   const siblingNotes = (doc: string): string => doc + NOTES_EXT;
   const docOf = (notesFile: string): string => notesFile.slice(0, -NOTES_EXT.length);
 
@@ -339,7 +306,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
     return out;
   };
 
-  // The document an argument names: a path to it or to its .notes file, else a
+  // The document an argument names: a path to it or to its .review.md file, else a
   // description, resolved against *candidates* (asking when there are several).
   // Never guessed by the model: fixups outside git edit in place, unversioned.
   const resolveDoc = async (
@@ -365,7 +332,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
     return index < 0 ? undefined : unique[index];
   };
 
-  // Documents in the cwd that have notes (doc.md for doc.md.notes).
+  // Documents in the cwd that have notes (doc.md for doc.md.review.md).
   const notedDocsIn = (dir: string): string[] => {
     try {
       return readdirSync(dir)
@@ -377,70 +344,6 @@ export default function reviewNotes(pi: ExtensionAPI) {
   };
 
   // ---------------------------------------------------------------------------
-  // Marking what pi changed: a notes file is snapshotted before the agent can
-  // touch it (when a command hands it over, or right before an edit/write tool
-  // call on it) and compared when the run settles. Snapshots last one run, so
-  // my own edits between runs are never mistaken for pi's. Added or changed
-  // entries get [new]; moved locations alone do not count.
-  // ---------------------------------------------------------------------------
-  const snapshots = new Map<string, string>();
-
-  const isNotesFile = (p: string): boolean => p.endsWith(NOTES_EXT) || /\/\.git\/(.*\/)?review\/.+\.txt$/.test(p);
-
-  const snapshot = (p: string): void => {
-    if (!snapshots.has(p)) snapshots.set(p, readText(p));
-  };
-
-  // An entry is identified across edits by its path and text without tags; it
-  // changed when its state tags or body did ([new] itself does not count).
-  const entryKey = (h: Head): string => `${h.path ?? ""}\0${h.text}`;
-  const entrySig = (h: Head, body: string[]): string =>
-    h.tags.filter((t) => t !== "new").sort().join(" ") + "\n" + body.join("\n").trimEnd();
-
-  // Tag what changed in *p* since *before*; returns how many entries.
-  const markChanges = (p: string, before: string): number => {
-    const after = readText(p);
-    if (after === before) return 0;
-    const old = new Map<string, string[]>();
-    for (const { head, body } of parseEntries(before)) {
-      old.set(entryKey(head), [...(old.get(entryKey(head)) ?? []), entrySig(head, body)]);
-    }
-    const lines = after.split("\n");
-    let changed = 0;
-    for (const { index, head, body } of parseEntries(after)) {
-      if (old.get(entryKey(head))?.shift() === entrySig(head, body)) continue;
-      if (head.tags.includes("new")) continue;
-      // Tags are written in the order [resolved] [draft] [id:X] [new].
-      const line = lines[index]!;
-      lines[index] = `${line.slice(0, head.tagsEnd)}[new] ${line.slice(head.tagsEnd)}`;
-      changed++;
-    }
-    if (changed > 0) writeFileSync(p, lines.join("\n"));
-    return changed;
-  };
-
-  pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "edit" && event.toolName !== "write") return;
-    const path = (event.input as { path?: unknown }).path;
-    if (typeof path !== "string") return;
-    const abs = resolve(ctx.cwd, expandHome(path));
-    if (isNotesFile(abs)) snapshot(abs);
-  });
-
-  pi.on("agent_settled", async (_event, ctx) => {
-    let changed = 0;
-    for (const [p, before] of snapshots) {
-      try {
-        changed += markChanges(p, before);
-      } catch {}
-    }
-    snapshots.clear();
-    if (changed > 0) {
-      ctx.ui.notify(`Review notes: ${changed} note${changed === 1 ? "" : "s"} marked [new].`, "info");
-    }
-  });
-
-  // ---------------------------------------------------------------------------
   // Document reviews (outside git)
   // ---------------------------------------------------------------------------
   // The document outside git that *arg* is about, undefined when the command
@@ -449,7 +352,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
   // counts; outside a repo the argument is required and may
   // also be a description, matched against the files of this session and
   // the cwd's documents with notes. *needNotes*: only documents that have a
-  // .notes file (/fixup).
+  // .review.md file (/fixup).
   const documentTarget = async (
     arg: string,
     ctx: ExtensionCommandContext,
@@ -470,7 +373,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
       if (!arg) {
         const docs = notedDocsIn(ctx.cwd);
         ctx.ui.notify(
-          `/${command} outside a git repository needs the document: a path, its .notes file, ` +
+          `/${command} outside a git repository needs the document: a path, its .review.md file, ` +
             `or a description of it` +
             (docs.length ? ` (documents with notes here: ${docs.map((d) => basename(d)).join(", ")}).` : "."),
           "warning",
@@ -497,27 +400,25 @@ export default function reviewNotes(pi: ExtensionAPI) {
   const reviewDocument = (doc: string): void => {
     const notesFile = siblingNotes(doc);
     const name = basename(doc);
-    snapshot(notesFile);
     pi.sendUserMessage(`Review the document \`${doc}\` as an editor and domain expert. Do not edit it.
 
 1. Read it and what it references. Check claims in a design or proposal against the code.
 2. Look for, in priority order: wrong or unverifiable claims, gaps and missing cases, contradictions, unclear structure or reasoning, wording. ${findingTags("At most 10 findings, highest priority first.", false)}
-3. ${appendFindings(notesFile, [`# pi review (<YYYY-MM-DD HH:MM>): ${VERDICT}`], name, [
+3. ${appendFindings(notesFile, name, [
       `Path: the bare file name \`${name}\`. Verify line numbers by reading the file.`,
     ])}
-4. Print the notes path and counts per tag. Stop.`);
+4. Print the notes path, the verdict ${VERDICT} and counts per tag. Stop.`);
   };
 
   const fixupDocument = (doc: string, ctx: ExtensionCommandContext): void => {
     const notesFile = siblingNotes(doc);
     const name = basename(doc);
-    const all = readNotes(notesFile);
+    const all = readThreads(notesFile);
     const selected = all.filter(needsPi);
     if (selected.length === 0) {
       reportNothingForPi(all, `in ${basename(notesFile)}`, ctx);
       return;
     }
-    snapshot(notesFile);
     pi.sendUserMessage(`Address my review notes on \`${doc}\`. Notes: \`${notesFile}\` (paths are \`${name}\`).
 
 ${onlyThese(selected)}
@@ -536,10 +437,11 @@ ${bullets([
   // ---------------------------------------------------------------------------
   // /review
   //
-  // Findings are appended to the notes file as `[draft]` entries, next to the
-  // human's own notes. `[draft]` means "not approved yet": pushing and /fixup
-  // skip those entries until the human removes the tag (approve) or resolves
-  // the entry (reject), so every finding gets read against the code.
+  // Findings are appended to the notes file as threads with a proposed
+  // comment, next to the human's own notes. Proposed means "not approved yet":
+  // publish and /fixup skip those threads until the human approves them
+  // (`:Review approve`) or discards them, so every finding gets read against
+  // the code.
   //
   // The argument is free text (scope, ticket, focus, blast radius), read by the
   // model. No plan: the reviewer judges the code against the problem, not
@@ -548,11 +450,11 @@ ${bullets([
   // ---------------------------------------------------------------------------
   pi.registerCommand("review", {
     description:
-      "Review code and append findings as [draft] notes to the review notes file. " +
+      "Review code and append findings as proposed comments to the review notes file. " +
       "The argument is free text: scope, ticket, focus, blast radius (e.g. 'last 3 commits, " +
       "see KAT-1234, core change'). Default scope = uncommitted changes when there are " +
       "any, else the branch against its MR target. A document outside git (its path, or " +
-      "outside a repo a description of it) is reviewed into its sibling .notes file. " +
+      "outside a repo a description of it) is reviewed into its sibling .review.md file. " +
       "Usage: /review [request]",
     handler: async (args, ctx) => {
       if (!requireIdle("review", ctx)) return;
@@ -570,8 +472,7 @@ ${bullets([
         return;
       }
 
-      snapshot(notesFile);
-
+  
       const request = arg ? `Request (scope, ticket, focus, depth):\n${arg}` : "Request: none.";
 
       pi.sendUserMessage(`Review code on branch \`${branch}\` as a strict senior engineer. Much of it is AI-generated: expect reinvented wheels, needless code, tests that check the wrong thing. Change no code; findings go to the notes file.
@@ -607,10 +508,6 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
 
 5. ${appendFindings(
         notesFile,
-        [
-          `# pi review of <scope> (<YYYY-MM-DD HH:MM>): ${VERDICT}`,
-          "# depth: <light | mixed | wide> (<stated | estimated>): <what is deep, what is light>",
-        ],
         "<path>",
         [
           "The file is inside .git: never commit it.",
@@ -618,7 +515,7 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
           "Wording ready to post to a colleague: specific, polite, no IDs, no mention of this prompt.",
         ],
       )}
-6. Print the notes path, the depth line and counts per tag. Stop: no commits, no git-lab.`);
+6. Print the notes path, the verdict ${VERDICT}, the depth line (<light | mixed | wide>, <stated | estimated>, what is deep) and counts per tag. Stop: no commits, no git-lab.`);
     },
   });
 
@@ -635,7 +532,7 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
     description:
       "Address the open review notes: notes on code become fixup! commits, notes on a " +
       "document outside git are edited in place; both are resolved with a reply. Scope: " +
-      "files/directories, or a document outside git (its path, its .notes file, or outside " +
+      "files/directories, or a document outside git (its path, its .review.md file, or outside " +
       "a repo a description); none = all open notes of the branch. Notes on code need a " +
       "clean tree. Usage: /fixup [scope]",
     handler: async (args, ctx) => {
@@ -651,7 +548,7 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
       const root = git(ctx.cwd, "rev-parse", "--show-toplevel");
       if (!notesFile || !root) {
         ctx.ui.notify(
-          "/fixup outside a git repository needs the document: /fixup <file>, its .notes file, " +
+          "/fixup outside a git repository needs the document: /fixup <file>, its .review.md file, " +
             "or a description of it.",
           "warning",
         );
@@ -659,7 +556,7 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
       }
 
       const scope = args.trim();
-      const all = readNotes(notesFile).filter((n) => inScope(n, scope, root, ctx.cwd));
+      const all = readThreads(notesFile).filter((n) => inScope(n, scope, root, ctx.cwd));
       const selected = all.filter(needsPi);
       if (selected.length === 0) {
         const where = `in the review notes${scope ? ` (scope "${scope}")` : ""}`;
@@ -667,19 +564,17 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
         return;
       }
       if (!requireCleanTree(ctx.cwd, "fixup", ctx)) return;
-      snapshot(notesFile);
-
+  
       pi.sendUserMessage(`Address my review notes on branch \`${branch}\`. Notes: \`${notesFile}\` (inside .git, never commit it; paths repo-relative).
 
 ${onlyThese(selected)}
 
-${NOTES_FORMAT} Entries with [id:X] are remote threads.
+${NOTES_FORMAT} Threads with an \`id\` are remote threads.
 
 Per note: find the code from the note's text (line numbers drift), make the smallest fix, build and test per the project's instructions, commit as \`fixup! <subject>\` of the branch commit that introduced the code, staging only your changes (notes on one commit may share a fixup). Notes on a whole file (\`path:0\`) and general entries are fixups too: of the branch commit closest in topic, else the latest one. A note on a submodule path is about the pointer: fetch in the submodule, check out the ref it asks for (unclear: treat the note as unclear), build and test, stage the submodule path; never commit inside the submodule unless the note says so. These commits are requested; never rebase, amend, squash or push; never run git-lab.
 
 ${bullets([
         ...RESOLVE_RULES,
-        "Threads ([id:X]) instead: your lines are replies to the reviewer, so no `> @pi:` lines. Handled: add a reply line (two-space indent, no `>`) saying what changed, and insert `[resolved] [draft] ` after the location. Unclear: add a reply line asking the reviewer, and insert `[draft] `.",
         "No commit SHAs in the notes (they change on squash).",
         "End with no uncommitted changes to tracked files and no new untracked files of yours.",
         "Print one line per note: fixup target commit, or the question.",
