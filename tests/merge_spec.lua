@@ -131,14 +131,55 @@ describe("plan", function()
     assert.is_true(plan.items[1].stale)
   end)
 
-  it("published drops the sent text and records the id and status", function()
+  it("published removes a new thread with its text, and keeps the status", function()
     local doc = store.parse({ "## a.c:1", "status: open", "", "### me (local)", "x", "" })
     local s = { threads = {} }
-    local item = merge.plan(doc, s).items[1]
-    merge.published(doc, s, item, "n1")
-    assert.are.equal("n1", doc.threads[1].id)
+    merge.published(doc, s, merge.plan(doc, s).items[1])
+    assert.are.equal(0, #doc.threads)
+
+    doc = store.parse({ "## a.c:1 {id=t1}", "status: resolved", "", "### me (local)", "x", "" })
+    s = { threads = { t1 = { status = "open", seen = {}, seen_status = true } } }
+    for _, item in ipairs(merge.plan(doc, s).items) do merge.published(doc, s, item) end
+    assert.are.equal(1, #doc.threads)
     assert.are.equal(0, #doc.threads[1].comments)
-    assert.are.equal("open", s.threads.n1.status)
-    assert.are.equal(0, #merge.plan(doc, s).items)
+    assert.are.equal("resolved", s.threads.t1.status)
+  end)
+
+  it("sends an orphaned thread as a new one", function()
+    local doc = store.parse({ "## a.c:1 {id=gone orphan}", "status: open", "", "### me (local)", "x", "" })
+    assert.are.equal("thread", merge.plan(doc, { threads = {} }).items[1].kind)
+  end)
+end)
+
+describe("flags", function()
+  it("tells apart the states an icon needs", function()
+    local doc = store.parse({
+      "## a.c:1 {id=t1}", "status: open", "", "### @x {id=1}", "q", "", "### me (proposed)", "p", "",
+    })
+    local f = merge.flags(doc.threads[1], { status = "open", seen = {}, seen_status = true })
+    assert.is_true(f.unread and f.proposed)
+    assert.is_false(f.unsent)
+    assert.are.equal("unread", (merge.urgency(f)))
+    local state = { status = "resolved", seen = { ["1"] = true }, seen_status = true }
+    f = merge.flags(doc.threads[1], state)
+    assert.is_true(f.unsent) -- reopened locally, not published
+    assert.are.equal("proposed", (merge.urgency(f)))
+  end)
+end)
+
+describe("relocate", function()
+  it("finds the sent comment in a document that changed meanwhile", function()
+    local side = { threads = {} }
+    local doc = store.parse({ "## a.c:1", "status: open", "", "### me (local)", "x", "" })
+    local item = merge.plan(doc, side).items[1]
+    local fresh = store.parse({
+      "## b.c:9", "status: open", "", "### me (proposed)", "agent", "",
+      "## a.c:1", "status: open", "", "### me (local)", "x", "", "### me (proposed)", "y", "",
+    })
+    local moved = merge.relocate(fresh, item)
+    assert.are.equal(fresh.threads[2], moved.thread)
+    merge.published(fresh, side, moved)
+    assert.are.equal("proposed", fresh.threads[2].comments[1].source)
+    assert.is_nil(merge.relocate(store.parse({ "## a.c:1", "status: open" }), item))
   end)
 end)

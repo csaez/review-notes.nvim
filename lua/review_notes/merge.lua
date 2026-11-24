@@ -104,6 +104,44 @@ function M.mark_seen(thread, side)
   state.seen_status = true
 end
 
+---@class review_notes.Flags
+---@field unread boolean
+---@field proposed boolean a tool's comment waits for my approval
+---@field unsent boolean text of mine, or a status change, not published yet
+---@field resolved boolean
+---@field resolved_by string? set while someone else's resolve is unseen
+---@field new boolean the thread does not exist on the remote yet
+---@field orphan boolean
+
+--- Everything a view needs to know about a thread's state.
+---@param thread review_notes.Thread
+---@param state review_notes.ThreadState?
+---@return review_notes.Flags
+function M.flags(thread, state)
+  local unseen = M.resolved_unseen(thread, state)
+  return {
+    unread = M.is_unread(thread, state),
+    proposed = has_source(thread, "proposed"),
+    unsent = has_source(thread, "local")
+      or (thread.id ~= nil and state ~= nil and thread.status ~= state.status),
+    resolved = thread.status == "resolved",
+    resolved_by = unseen and state and state.resolved_by or nil,
+    new = thread.id == nil or thread.orphan == true,
+    orphan = thread.orphan == true,
+  }
+end
+
+--- The most urgent state, for an icon and for sorting: lower is more urgent.
+---@param f review_notes.Flags
+---@return "unread"|"proposed"|"unsent"|"resolved"|"open", integer
+function M.urgency(f)
+  if f.unread then return "unread", 1 end
+  if f.proposed then return "proposed", 2 end
+  if f.unsent then return "unsent", 3 end
+  if f.resolved then return "resolved", 5 end
+  return "open", 4
+end
+
 -- Pull ------------------------------------------------------------------
 
 local function sort_key(thread)
@@ -111,7 +149,7 @@ local function sort_key(thread)
   return a.path and 1 or 0, a.path or "", a.line or 0
 end
 
-local function sort_threads(threads)
+function M.sort(threads)
   local indexed = {}
   for i, t in ipairs(threads) do indexed[i] = { t = t, i = i } end
   table.sort(indexed, function(x, y)
@@ -218,7 +256,7 @@ function M.pull(doc, side, remote)
     end
   end
   doc.threads = kept
-  sort_threads(doc.threads)
+  M.sort(doc.threads)
   return report
 end
 
@@ -244,7 +282,8 @@ end
 function M.plan(doc, side)
   local plan = { items = {}, held = {} }
   for _, t in ipairs(doc.threads) do
-    local state = t.id and side.threads[t.id] or nil
+    local id = not t.orphan and t.id or nil
+    local state = id and side.threads[id] or nil
     local stale = state ~= nil and M.unread_count(t, state) > 0
     local proposed = has_source(t, "proposed")
     if proposed then table.insert(plan.held, t) end
@@ -252,29 +291,30 @@ function M.plan(doc, side)
     for _, c in ipairs(t.comments) do
       if c.source == "local" and c.body ~= "" then
         table.insert(plan.items, {
-          kind = t.id and "reply" or "thread",
+          kind = id and "reply" or "thread",
           thread = t,
           comment = c,
           stale = stale or nil,
         })
-        if not t.id then break end
+        if not id then break end
       end
     end
 
-    if t.id and state and not proposed and t.status ~= state.status then
+    if id and state and not proposed and t.status ~= state.status then
       table.insert(plan.items, { kind = t.status == "resolved" and "resolve" or "unresolve", thread = t })
     end
   end
   return plan
 end
 
---- Record that *item* was published: the sent text leaves the document (the
---- next pull brings it back as a remote comment) and a new thread gets its id.
+--- Record that *item* was published: the sent text leaves the document and
+--- the next pull brings it back as a remote comment. A thread that does not
+--- exist remotely (new, or orphaned) goes away with its text: the pull
+--- re-adds it under its real id.
 ---@param doc review_notes.Doc
 ---@param side review_notes.Sidecar
 ---@param item review_notes.PlanItem
----@param remote_id string? the id the remote gave a new thread
-function M.published(doc, side, item, remote_id)
+function M.published(doc, side, item)
   local t = item.thread
   if item.comment then
     for i, c in ipairs(t.comments) do
@@ -284,14 +324,46 @@ function M.published(doc, side, item, remote_id)
       end
     end
   end
-  if item.kind == "thread" and remote_id then
-    t.id = remote_id
-    local state = state_of(side, remote_id)
-    state.status = "open"
+  if item.kind == "thread" and not M.has_unpublished(t) then
+    for i, other in ipairs(doc.threads) do
+      if other == t then
+        table.remove(doc.threads, i)
+        break
+      end
+    end
   elseif item.kind == "resolve" or item.kind == "unresolve" then
     state_of(side, t.id).status = t.status
   end
-  return doc
+end
+
+--- The thread and comment of *item* in a freshly read *doc*, as an item that
+--- `published` can act on, or nil when it is gone or changed meanwhile.
+---@param doc review_notes.Doc
+---@param item review_notes.PlanItem
+---@return review_notes.PlanItem?
+function M.relocate(doc, item)
+  local old = item.thread
+  local anchor = store.anchor_string(old.anchor)
+  local keyed = old.id ~= nil and not old.orphan
+  for _, t in ipairs(doc.threads) do
+    local same
+    if keyed then
+      same = t.id == old.id
+    else
+      same = (t.id == nil or t.orphan) and t.id == old.id and store.anchor_string(t.anchor) == anchor
+    end
+    if same then
+      if not item.comment then
+        if t.status == old.status then return { kind = item.kind, thread = t } end
+      else
+        for _, c in ipairs(t.comments) do
+          if c.source == "local" and c.body == item.comment.body then
+            return { kind = item.kind, thread = t, comment = c }
+          end
+        end
+      end
+    end
+  end
 end
 
 -- Approve ---------------------------------------------------------------

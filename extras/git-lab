@@ -700,7 +700,7 @@ def inline_position(repo: Repo, mr: dict, path: str, line: int) -> dict:
 
 def thread_json(disc: dict, me: str, lines: LineMapper | None = None) -> dict | None:
     """A GitLab discussion as ``{id, path, line, start_line, resolved,
-    resolvable, resolved_by, resolved_by_me, comments = [{author, body,
+    resolvable, resolved_by, resolved_by_me, comments = [{id, author, body,
     mine}]}``, or None when it has no comments (system notes only).
     ``resolved_by`` is the username that resolved it (None when open or
     unknown); ``mine`` and ``resolved_by_me`` compare with *me*, so callers
@@ -744,6 +744,7 @@ def thread_json(disc: dict, me: str, lines: LineMapper | None = None) -> dict | 
         "resolved_by_me": resolver is not None and resolver == me,
         "comments": [
             {
+                "id": str(n["id"]),
                 "author": (n.get("author") or {}).get("username", "unknown"),
                 "body": n.get("body") or "",
                 "mine": (n.get("author") or {}).get("username") == me,

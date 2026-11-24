@@ -289,7 +289,10 @@ function M.write_lines(path, lines)
   return true
 end
 
-local function stamp(path)
+--- A cheap fingerprint of a file, to notice that it changed.
+---@param path string
+---@return string
+function M.stamp(path)
   local st = uv.fs_stat(path)
   return st and (st.mtime.sec .. "." .. st.mtime.nsec .. ":" .. st.size) or "none"
 end
@@ -303,11 +306,15 @@ end
 ---@return T? result
 function M.update(path, fn)
   for _ = 1, 5 do
-    local before = stamp(path)
-    local doc = M.parse(M.read_lines(path))
+    local before = M.stamp(path)
+    local lines = M.read_lines(path)
+    local doc = M.parse(lines)
     local result = fn(doc)
-    if stamp(path) == before then
-      local ok, err = M.write_lines(path, M.render(doc))
+    if M.stamp(path) == before then
+      local out = M.render(doc)
+      -- No write when nothing changed: it would wake every file watcher.
+      if vim.deep_equal(out, lines) then return result end
+      local ok, err = M.write_lines(path, out)
       if not ok then error("cannot write " .. path .. ": " .. tostring(err)) end
       return result
     end
