@@ -292,8 +292,12 @@ def collect_mrs(
     return result
 
 
-def resolve_mr(repo: Repo, iid: int | None) -> dict:
-    """Return the MR with *iid*, or the open MR of the current branch."""
+def resolve_mr(repo: Repo, iid: int | None, full: bool = False) -> dict:
+    """Return the MR with *iid*, or the open MR of the current branch.
+
+    :param full: fetch the whole MR even when the branch lookup found it; the
+        list entry lacks ``diff_refs``.
+    """
     if iid is not None:
         return get_mr(repo, iid)
     branch = current_branch()
@@ -303,8 +307,7 @@ def resolve_mr(repo: Repo, iid: int | None) -> dict:
     if len(mrs) > 1:
         refs = ", ".join(f"!{mr['iid']}" for mr in mrs)
         sys.exit(f"Several open MRs for branch '{branch}' ({refs}); pass one.")
-    # The list endpoint omits diff_refs, which notes push needs.
-    return get_mr(repo, mrs[0]["iid"])
+    return get_mr(repo, mrs[0]["iid"]) if full else mrs[0]
 
 
 def mr_url(repo: Repo, mr: dict) -> str:
@@ -644,29 +647,44 @@ def parse_location(loc: str) -> tuple[str, int]:
     return path, int(line)
 
 
+def mr_paths(repo: Repo, mr: dict, refs: dict) -> set[str]:
+    """New paths of the files the MR changes."""
+    # Locally when the commits are fetched: the API's /diffs carries every
+    # file's diff, heavy on a large MR.
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", "-z", "-M", refs["base_sha"], refs["head_sha"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return {p for p in proc.stdout.split("\0") if p}
+    diffs = or_exit(repo.get_all, f"{repo.mr_path(mr['iid'])}/diffs")
+    return {d.get("new_path") for d in diffs}
+
+
 def inline_position(repo: Repo, mr: dict, path: str, line: int) -> dict:
     """GitLab diff position for *line* of *path* at the MR head; line 0 is
     the whole file."""
-    # GitLab accepts a draft on a file outside the MR and then silently drops
-    # it when published, so refuse up front.
-    diffs = or_exit(repo.get_all, f"{repo.mr_path(mr['iid'])}/diffs")
-    if path not in {d.get("new_path") for d in diffs}:
-        sys.exit(
-            f"{path} is not changed by MR !{mr['iid']}; "
-            "use --general to post it as a general comment."
-        )
     refs = mr.get("diff_refs") or {}
     if not refs.get("head_sha"):
         sys.exit("The MR has no diff refs yet.")
-    shas = {k: refs[k] for k in ("base_sha", "start_sha", "head_sha")}
-    if line == 0:
-        return {"position_type": "file", **shas, "new_path": path, "old_path": path}
     # Line numbers only mean something when the checkout is what GitLab shows.
-    if git("rev-parse", "HEAD") != refs["head_sha"]:
+    if line != 0 and git("rev-parse", "HEAD") != refs["head_sha"]:
         sys.exit(
             f"HEAD is not the MR head ({refs['head_sha'][:10]}); "
             "check out the MR branch first."
         )
+    # GitLab accepts a draft on a file outside the MR and then silently drops
+    # it when published, so refuse up front.
+    if path not in mr_paths(repo, mr, refs):
+        sys.exit(
+            f"{path} is not changed by MR !{mr['iid']}; "
+            "use --general to post it as a general comment."
+        )
+    shas = {k: refs[k] for k in ("base_sha", "start_sha", "head_sha")}
+    if line == 0:
+        return {"position_type": "file", **shas, "new_path": path, "old_path": path}
     _, old = old_line_for(refs["base_sha"], refs["head_sha"], path, line)
     position = {
         "position_type": "text",
@@ -745,8 +763,13 @@ def emit_id(args: argparse.Namespace, ident: Any, what: str) -> None:
 def cmd_comment_list(args: argparse.Namespace) -> None:
     repo = repo_from_cwd()
     mr = resolve_mr(repo, args.mr)
-    discussions = or_exit(repo.get_all, f"{repo.mr_path(mr['iid'])}/discussions")
-    me = or_exit(repo.api, "GET", "/api/v4/user")["username"]
+    # Independent and latency bound: fetch them concurrently.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        disc_job = pool.submit(
+            or_exit, repo.get_all, f"{repo.mr_path(mr['iid'])}/discussions"
+        )
+        user_job = pool.submit(or_exit, repo.api, "GET", "/api/v4/user")
+        discussions, me = disc_job.result(), user_job.result()["username"]
     lines = LineMapper()
     threads = [t for d in discussions if (t := thread_json(d, me, lines))]
     if args.json:
@@ -766,8 +789,8 @@ def cmd_comment_list(args: argparse.Namespace) -> None:
 
 def cmd_comment_add(args: argparse.Namespace) -> None:
     repo = repo_from_cwd()
-    mr = resolve_mr(repo, args.mr)
     path, line = parse_location(args.location) if args.location else (None, 0)
+    mr = resolve_mr(repo, args.mr, full=bool(path) and not args.general)
     text = read_text(args.text)
     mr_api = repo.mr_path(mr["iid"])
     if args.general and path:
