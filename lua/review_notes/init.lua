@@ -257,13 +257,28 @@ local function live_notes(buf)
   return result
 end
 
+-- A draft waiting for my approval: open, or resolved with a reply or a
+-- resolve still to send (how pi hands back a thread it handled).
+local function awaits_approval(e) return e.draft and (not e.resolved or nf.has_changes(e)) end
+
 -- What an entry needs from me, most urgent first: something someone else
 -- changed (new, even if resolved: pi resolving a note is a claim to check),
 -- a draft to approve, else just its kind.
 local function state(e)
   if e.new then return "new" end
+  if awaits_approval(e) then return "draft" end
   if e.resolved then return "resolved" end
-  return e.draft and "draft" or e.kind
+  return e.kind
+end
+
+-- Tags worth showing next to the icon, which shows only the most urgent.
+local function badges(e)
+  local out = {}
+  if e.new then table.insert(out, "new") end
+  if e.draft then table.insert(out, "draft") end
+  if e.resolved then table.insert(out, "resolved") end
+  if e.id and nf.has_changes(e) and not e.draft then table.insert(out, "unsent") end
+  return out
 end
 
 -- Needs my attention: changed by someone else, whoever that is.
@@ -494,6 +509,8 @@ local function entries_of(ctx, cache)
       -- Resolved entries are done, unless pi resolved them and I have not looked.
       local st = state(e)
       if st ~= "resolved" then n[st] = (n[st] or 0) + 1 end
+      -- Drafts are counted even when [new] wins the icon: each one waits for me.
+      if st ~= "draft" and awaits_approval(e) then n.draft = (n.draft or 0) + 1 end
     end
     counts[ctx.path] = n
     if M.config.watch then watch(ctx.path) end
@@ -611,10 +628,7 @@ end
 
 local function note_title(e, ref)
   if not e then return (ref.fresh and "New note on " or "Gone: ") .. where(ref.loc) end
-  local tags = {}
-  for _, t in ipairs({ "new", "draft", "resolved" }) do
-    if e[t] then table.insert(tags, t) end
-  end
+  local tags = badges(e)
   local who = e.head:match("^@[%w._-]+")
   return where(e.loc) .. (who and ("  " .. who) or "") .. (#tags > 0 and ("  [" .. table.concat(tags, ", ") .. "]") or "")
 end
@@ -1016,6 +1030,7 @@ end
 ---@field hl string highlight of the icon
 ---@field summary string first line of the note
 ---@field summary_hl string
+---@field tags string[] states beyond the icon, in order: "new", "draft", "resolved", "unsent"
 ---@field general boolean about the whole change: `file` is the notes file, `line` the entry
 ---@field thread string[] the whole conversation as markdown lines, for a preview
 ---@field note table the note, for `M.goto_item`
@@ -1030,15 +1045,16 @@ function M.items(buf)
   local items = {}
   for _, n in ipairs(all_notes(ctx)) do
     local icon, hl = look(n.e)
+    local tags = badges(n.e)
     table.insert(items, {
       text = table.concat({
         n.e.kind,
         n.e.resolved and "resolved" or "open",
-        n.e.new and "new" or "",
-        n.e.draft and "draft" or "",
+        table.concat(tags, " "),
         n.e.path or "general",
         n.e.text,
       }, " "),
+      tags = tags,
       file = n.file,
       line = n.line,
       end_line = n.end_line,
@@ -1047,7 +1063,8 @@ function M.items(buf)
       summary = n.e.text:match("^[^\n]*"),
       thread = nf.entry_view(n.e),
       general = n.e.general,
-      summary_hl = n.e.resolved and "ReviewResolved" or "ReviewText",
+      -- Dimmed only when done: a resolved entry with something to send is not.
+      summary_hl = n.e.resolved and not nf.has_changes(n.e) and "ReviewResolved" or "ReviewText",
       note = n,
     })
   end

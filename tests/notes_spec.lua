@@ -319,6 +319,17 @@ describe("plan", function()
     assert.are.equal(2, notes.plan(lines).drafts)
   end)
 
+  it("counts a resolved draft that holds a reply, as pi hands back a thread", function()
+    local plan = notes.plan({
+      "a.c:1: [resolved] [draft] [id:t1] @al: q",
+      "  > @al: q",
+      "  fixed it",
+      "a.c:2: [resolved] [draft] dismissed",
+    })
+    assert.are.equal(1, plan.drafts)
+    assert.is_nil(notes.describe(plan))
+  end)
+
   it("describes the plan", function()
     assert.are.equal("2 new threads, 1 reply, 2 state changes", notes.describe(notes.plan(lines)))
     assert.is_nil(notes.describe(notes.plan({ "a.c:1: [draft] x" })))
@@ -335,6 +346,18 @@ describe("plan", function()
     assert.is_nil(notes.describe(plan))
     assert.are.equal(3, plan.held)
     assert.are.equal(" (3 [new] entries held back until read)", notes.describe_skipped(plan))
+  end)
+end)
+
+describe("entry_view", function()
+  it("marks my unsent reply on a thread apart from the remote comments", function()
+    local function view(l) return notes.entry_view(notes.parse(l)[1]) end
+    local thread = { "a.c:1: [id:t1] @al: why?", "  > @bo: because", "  my answer" }
+    assert.are.same({ "### @al", "why?", "", "### @bo", "because", "", notes.UNSENT_VIEW, "my answer" }, view(thread))
+    thread[1] = "a.c:1: [draft] [id:t1] @al: why?"
+    assert.are.equal(notes.UNSENT_DRAFT_VIEW, view(thread)[7])
+    -- A note never sent is unsent as a whole: no marker inside it.
+    assert.are.same({ "mine", "more" }, view({ "a.c:1: mine", "  more" }))
   end)
 end)
 

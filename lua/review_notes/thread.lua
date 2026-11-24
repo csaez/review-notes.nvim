@@ -36,7 +36,9 @@ end
 function M.decorate(buf, lines)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   local style = require("review_notes").style
-  local resolved = require("review_notes.notes").RESOLVED_VIEW
+  local nf = require("review_notes.notes")
+  local resolved = nf.RESOLVED_VIEW
+  local unsent = { [nf.UNSENT_VIEW] = { style.send, " not sent yet" }, [nf.UNSENT_DRAFT_VIEW] = { style.draft, " draft, not sent" } }
   local function icon_at(row, st, text)
     vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
       virt_text = { { st.icon .. text, st.hl } },
@@ -51,6 +53,9 @@ function M.decorate(buf, lines)
     elseif l == resolved then
       vim.api.nvim_buf_set_extmark(buf, ns, row, 0, { end_col = #l, conceal = "" })
       icon_at(row, style.resolved, " resolved")
+    elseif unsent[l] then
+      vim.api.nvim_buf_set_extmark(buf, ns, row, 0, { end_col = #l, conceal = "" })
+      icon_at(row, unsent[l][1], unsent[l][2])
     end
   end
 end

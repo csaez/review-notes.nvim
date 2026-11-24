@@ -51,6 +51,11 @@ local RESOLVED_MARK = "> (resolved)"
 --- Line of a conversation view (thread_view, entry_view) for a resolved thread.
 M.RESOLVED_VIEW = "> [!TIP] Resolved"
 
+--- Lines of an entry view above my unsent reply to a thread: what follows is
+--- still local, as a draft (needs approval) or ready for the next push.
+M.UNSENT_VIEW = "> [!NOTE] Not sent yet"
+M.UNSENT_DRAFT_VIEW = "> [!WARNING] Draft, not sent"
+
 --- Escape a line of my text so it is not read as a quoted (remote) line.
 ---@param line string
 ---@return string
@@ -403,9 +408,15 @@ function M.entry_view(e)
     table.insert(out, e.head)
   end
   local first = true
+  -- On a thread my lines are a reply that only exists here; without the
+  -- marker they read as part of the last remote comment.
+  local unsent = e.id ~= nil
   for _, raw in ipairs(e.body) do
     if raw == RESOLVED_MARK then
       vim.list_extend(out, { "", M.RESOLVED_VIEW })
+    elseif raw:sub(1, 1) ~= ">" and unsent then
+      unsent = false
+      vim.list_extend(out, { "", e.draft and M.UNSENT_DRAFT_VIEW or M.UNSENT_VIEW, M.unescape(raw) })
     elseif raw:sub(1, 1) == ">" then
       local l = raw:gsub("^>%s?", "")
       -- Some backends repeat the first comment, the head, as the first quote.
@@ -680,14 +691,18 @@ end
 ---@field new review_notes.Entry[] entries to start as new threads (`send` has the text)
 ---@field replies review_notes.Entry[] threads with a reply of mine (`send` has the text)
 ---@field states review_notes.Entry[] threads whose resolved tag differs from the remote
----@field drafts integer open [draft] entries, which are never sent
+---@field drafts integer draft entries waiting for approval (open, or resolved with something to send), never sent
 ---@field held integer entries tagged new with something to send, held back until read
 
--- Whether *e* has something a push would send.
-local function has_changes(e)
+--- Whether *e* has something a push would send, were it approved and read:
+--- a new note, a reply, or a resolve / reopen.
+---@param e review_notes.Entry
+---@return boolean
+function M.has_changes(e)
   if e.id then return #e.mine > 0 or e.resolved ~= e.remote_resolved end
   return not e.resolved and vim.trim(e.head .. "\n" .. M.my_text(e.mine)) ~= ""
 end
+local has_changes = M.has_changes
 
 --- What a push would send.
 ---@return review_notes.Plan
@@ -697,7 +712,9 @@ function M.plan(lines)
     if e.path and vim.startswith(e.path, "/") then
       -- not a repo path: nothing GitLab could anchor it to
     elseif e.draft then
-      if not e.resolved then plan.drafts = plan.drafts + 1 end
+      -- A resolved draft still counts when it holds a reply or a resolve:
+      -- that is how pi hands back a thread it handled.
+      if not e.resolved or has_changes(e) then plan.drafts = plan.drafts + 1 end
     elseif e.new then
       if has_changes(e) then plan.held = plan.held + 1 end
     elseif not e.id then

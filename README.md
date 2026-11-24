@@ -42,7 +42,9 @@ src/http.cpp:120: [id:abc123] [new] @alice: why 30s?
   `[new]` (by a pull, or by an agent's round) until you reply, resolve or mark
   them read. `jump_new` steps through them across the whole review.
 - **Drafts.** `[draft]` keeps a note local until you approve it. This is handy
-  for notes written by a tool that you want to check first.
+  for notes written by a tool that you want to check first. A resolved thread
+  with a draft reply (how pi hands back what it fixed) still counts as a
+  draft to approve.
 - **Works outside git too.** Any other file, such as a markdown draft, gets a
   local review in a sibling `<file>.notes`.
 - **Pluggable backend.** All remote work goes through command lines you
@@ -282,9 +284,13 @@ returns the notes of the buffer's review. Each item has:
 
 - `file`, `line`, `end_line`
 - `icon`, `hl`, `summary`, `summary_hl`
+- `tags`: the states the icon does not show, in order: `new`, `draft`,
+  `resolved`, `unsent` (a reply or resolve on a thread, not pushed yet)
 - `general`: the note is about the whole change, and `file` is the notes file
 - `thread`: the conversation as markdown lines, for a preview (decorate it
-  with `require("review_notes.thread").decorate`)
+  with `require("review_notes.thread").decorate`). My unsent reply on a thread
+  is under a "not sent yet" (or "draft, not sent") line, apart from the
+  remote comments
 - `text`: searchable text (kind, state, path and note)
 
 To act on the chosen item:
@@ -316,6 +322,9 @@ picker = {
           table.insert(ret, { "whole change  ", "SnacksPickerDir" })
         else
           vim.list_extend(ret, Snacks.picker.format.filename(item, picker))
+        end
+        for _, tag in ipairs(item.tags) do
+          table.insert(ret, { "[" .. tag .. "] ", "SnacksPickerComment" })
         end
         table.insert(ret, { item.summary, item.summary_hl })
         return ret

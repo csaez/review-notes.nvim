@@ -239,6 +239,24 @@ describe("picker", function()
     assert.are.equal("second line", items[2].summary)
   end)
 
+  it("shows a draft reply pi left on a resolved [new] thread", function()
+    local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
+    vim.fn.writefile({
+      "a.c:1: [resolved] [draft] [id:t1] [new] @al: q",
+      "  > @al: q",
+      "  fixed it",
+      "a.c:2: [resolved] [id:t2] @al: r",
+      "  my reply",
+    }, dir .. "/main.txt")
+    local items = review.items()
+    assert.are.same({ "new", "draft", "resolved" }, items[1].tags)
+    assert.are.same({ "resolved", "unsent" }, items[2].tags)
+    assert.are.equal("ReviewText", items[1].summary_hl)
+    vim.cmd("edit a.c")
+    review.refresh()
+    assert.is_truthy(review.status():find(review.style.draft.icon .. " 1", 1, true))
+  end)
+
   it("marks a new item as read, keeping its state", function()
     local dir = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
     vim.fn.writefile({ "a.c:1: [resolved] [new] first" }, dir .. "/main.txt")

@@ -91,7 +91,8 @@ local function render(buf, conversation, reply)
   require("review_notes.thread").decorate(buf, conversation)
   state[buf].sep = sep
     and vim.api.nvim_buf_set_extmark(buf, ns, sep, 0, {
-      virt_text = { { " my turn, :w saves", "ReviewText" } },
+      -- Saving only writes the notes file: say so, as the remote is one push away.
+      virt_text = { { " my turn, :w saves locally (sent on push)", "ReviewText" } },
       virt_text_pos = "eol",
     })
   vim.bo[buf].modified = false
