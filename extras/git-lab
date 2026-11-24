@@ -4,11 +4,17 @@ git-lab -- GitLab merge request tooling for the current repository.
 
 Subcommands:
     mr list [--all] [--drafts] [--recursive] [--json]
-                            Print MRs as url<TAB>iid<TAB>author<TAB>title, or JSON.
-    mr review-assign IID [--project P]
-                            Add yourself as reviewer of the MR.
-    mr target [IID]         Print the MR target ref (origin/<branch>) for scripting.
-    mr approve [IID] [-m MSG]
+                            Print MRs as ref<TAB>author<TAB>branch<TAB>title<TAB>labels,
+                            or JSON (with the ref as _ref).
+    mr checkout REF [-r|--review]
+                            Check out the MR's source branch (fork MRs as
+                            mr/IID), in the submodule for a submodule's MR,
+                            fast-forwarding or replaying local commits over a
+                            force-push. --review: also assign yourself as
+                            reviewer.
+    mr review-assign REF    Add yourself as reviewer of the MR.
+    mr target [REF]         Print the MR target ref (origin/<branch>) for scripting.
+    mr approve [REF] [-m MSG]
                             Approve the MR of the current branch, optionally commenting.
     comment list [--mr IID] [--json]
                             Threads: {id, path, line, start_line, resolved,
@@ -35,7 +41,12 @@ Subcommands:
     review discard [--mr IID] [--only IDS]
                             Delete all pending comments, or just those drafts.
 
---mr defaults to the open MR of the current branch.
+REF is an MR of this repository or of one of its submodules: IID, !IID,
+group/project!IID or the MR URL. Without REF (and --mr defaults to) the open
+MR of the current branch.
+
+To pick an MR interactively, pipe ``mr list`` into a picker, e.g.:
+    git-lab mr checkout "$(git-lab mr list --recursive | fzf | cut -f1)"
 
 Environment:
     GITLAB_TOKEN   required -- token with api scope
@@ -49,6 +60,7 @@ import re
 import subprocess
 import sys
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -205,6 +217,66 @@ def mrs_for_branch(repo: Repo, branch: str) -> list[dict]:
     )
 
 
+def project_repo(repo: Repo, project: str | None) -> Repo:
+    """Return *repo*, or the submodule whose origin is *project*."""
+    if not project or project == repo.project:
+        return repo
+    match = next((s for s in submodules() if s[2] == project), None)
+    if not match:
+        sys.exit(f"No submodule with project {project}.")
+    path, host, project = match
+    return Repo(os.environ.get("GITLAB_HOST") or host, project, repo.token, path)
+
+
+_REF_RE = re.compile(r"(?:(?P<project>[^\s!]+)!|!)?(?P<iid>\d+)")
+_URL_RE = re.compile(r"https?://[^/]+/(?P<project>.+?)/-/merge_requests/(?P<iid>\d+)")
+
+
+def parse_ref(root: Repo, ref: str) -> tuple[Repo, int]:
+    """Resolve an MR reference to the repository it belongs to and its IID.
+
+    :param ref: ``IID``, ``!IID``, ``group/project!IID`` or an MR URL, of
+        *root* or of one of its submodules.
+    """
+    m = _URL_RE.fullmatch(ref.strip().rstrip("/")) or _REF_RE.fullmatch(ref.strip())
+    if not m:
+        sys.exit(f"Not an MR reference: {ref!r} (IID, !IID, group/project!IID or URL).")
+    return project_repo(root, m["project"]), int(m["iid"])
+
+
+def mr_ref(repo: Repo, root: Repo, iid: int) -> str:
+    """Short reference to an MR, qualified only outside *root*'s project."""
+    return f"!{iid}" if repo.project == root.project else f"{repo.project}!{iid}"
+
+
+def collect_mrs(
+    repo: Repo, recursive: bool, state: str = "opened", drafts: bool = False
+) -> list[dict]:
+    """MRs of *repo* (and its submodules), tagged with ``_repo`` and ``_path``."""
+    repos = [repo]
+    if recursive:
+        host_override = os.environ.get("GITLAB_HOST")
+        repos += [
+            Repo(host_override or h, p, repo.token, path) for path, h, p in submodules()
+        ]
+    # One request per project, latency bound: fetch them concurrently.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        per_repo = list(pool.map(lambda r: list_mrs(r, state), repos))
+    seen: set[str] = set()
+    result: list[dict] = []
+    for r, mrs in zip(repos, per_repo):
+        for mr in mrs:
+            url = mr.get("web_url", "")
+            if url in seen or (mr.get("draft") and not drafts):
+                continue
+            seen.add(url)
+            mr["_repo"] = r.project
+            mr["_path"] = r.path
+            mr["_ref"] = mr_ref(r, repo, mr["iid"])
+            result.append(mr)
+    return result
+
+
 def resolve_mr(repo: Repo, iid: int | None) -> dict:
     """Return the MR with *iid*, or the open MR of the current branch."""
     if iid is not None:
@@ -213,9 +285,11 @@ def resolve_mr(repo: Repo, iid: int | None) -> dict:
     mrs = mrs_for_branch(repo, branch)
     if not mrs:
         sys.exit(f"No open MR for branch '{branch}' in {repo.project} (use --mr IID).")
+    if len(mrs) > 1:
+        refs = ", ".join(f"!{mr['iid']}" for mr in mrs)
+        sys.exit(f"Several open MRs for branch '{branch}' ({refs}); pass one.")
     # The list endpoint omits diff_refs, which notes push needs.
-    mr = mrs[0] if len(mrs) == 1 else pick_mr(mrs)
-    return get_mr(repo, mr["iid"])
+    return get_mr(repo, mrs[0]["iid"])
 
 
 def mr_url(repo: Repo, mr: dict) -> str:
@@ -223,35 +297,6 @@ def mr_url(repo: Repo, mr: dict) -> str:
         mr.get("web_url")
         or f"https://{repo.host}/{repo.project}/-/merge_requests/{mr['iid']}"
     )
-
-
-def pick_mr(mrs: list[dict]) -> dict:
-    def line(mr: dict) -> str:
-        labels = "".join(f"  [{lbl}]" for lbl in mr.get("labels") or [])
-        author = (mr.get("author") or {}).get("username", "?")
-        state = "" if mr.get("state") == "opened" else f" [{mr.get('state')}]"
-        return f"!{mr['iid']:<5}  {mr.get('title', '')}{labels}  @{author}  {mr.get('source_branch', '?')}{state}"
-
-    try:
-        proc = subprocess.run(
-            [
-                "fzf",
-                "--prompt=Select MR> ",
-                "--height=40%",
-                "--layout=reverse",
-                "--no-multi",
-            ],
-            input="\n".join(line(mr) for mr in mrs),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        sys.exit("fzf not found -- pass an IID instead.")
-    if proc.returncode != 0 or not proc.stdout.strip():
-        sys.exit("No MR selected.")
-    iid = int(proc.stdout.split()[0].lstrip("!"))
-    return next(mr for mr in mrs if mr["iid"] == iid)
 
 
 # ---------------------------------------------------------------------------
@@ -373,40 +418,25 @@ class LineMapper:
 # Commands: mr
 # ---------------------------------------------------------------------------
 def cmd_mr_list(args: argparse.Namespace) -> None:
-    repo = repo_from_cwd()
-    repos = [repo]
-    if args.recursive:
-        host_override = os.environ.get("GITLAB_HOST")
-        repos += [
-            Repo(host_override or h, p, repo.token, path) for path, h, p in submodules()
-        ]
-    seen: set[str] = set()
-    result: list[dict] = []
-    for r in repos:
-        for mr in list_mrs(r, "all" if args.all else "opened"):
-            url = mr.get("web_url", "")
-            if url in seen or (mr.get("draft") and not args.drafts):
-                continue
-            seen.add(url)
-            mr["_repo"] = r.project
-            mr["_path"] = r.path
-            result.append(mr)
+    state = "all" if args.all else "opened"
+    result = collect_mrs(repo_from_cwd(), args.recursive, state, args.drafts)
     if args.json:
         print(json.dumps(result, indent=2))
         return
     for mr in result:
         author = (mr.get("author") or {}).get("username", "?")
-        print(f"{mr.get('web_url', '')}\t{mr['iid']}\t{author}\t{mr.get('title', '')}")
+        fields = [
+            mr["_ref"],
+            f"@{author}",
+            mr.get("source_branch", "?"),
+            mr.get("title", ""),
+            ", ".join(mr.get("labels") or []),
+        ]
+        # Tabs and newlines would break the columns.
+        print("\t".join(" ".join(f.split()) for f in fields))
 
 
-def cmd_mr_review_assign(args: argparse.Namespace) -> None:
-    repo = repo_from_cwd()
-    if args.project and args.project != repo.project:
-        match = next((s for s in submodules() if s[2] == args.project), None)
-        if not match:
-            sys.exit(f"No submodule with project {args.project}.")
-        repo = Repo(os.environ.get("GITLAB_HOST") or match[1], match[2], repo.token)
-    mr = get_mr(repo, args.iid)
+def review_assign(repo: Repo, mr: dict) -> None:
     user = or_exit(repo.api, "GET", "/api/v4/user")
     reviewers = [r["id"] for r in mr.get("reviewers") or []]
     if user["id"] not in reviewers:
@@ -417,6 +447,87 @@ def cmd_mr_review_assign(args: argparse.Namespace) -> None:
             {"reviewer_ids": reviewers + [user["id"]]},
         )
     print(f"Assigned @{user['username']} as reviewer of !{mr['iid']}")
+
+
+def cmd_mr_review_assign(args: argparse.Namespace) -> None:
+    repo, iid = parse_ref(repo_from_cwd(), args.ref)
+    review_assign(repo, get_mr(repo, iid))
+
+
+def checkout_mr(mr: dict, path: str) -> str:
+    """Check out *mr* in the repository at *path*; return the local branch."""
+
+    # No submodule recursion (a user config may set it): an MR may point a
+    # submodule at a commit no branch has, so switch would abort on it;
+    # `submodule update` below fetches it by SHA instead.
+    def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        cmd = ["git", "-c", "submodule.recurse=false", "-C", path, *args]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if check and proc.returncode != 0:
+            sys.exit(
+                f"git {' '.join(args)} failed in {path}:\n"
+                + (proc.stderr or proc.stdout).strip()
+            )
+        return proc
+
+    # Refuse on tracked changes: switch/rebase could stop halfway and leave
+    # the checkout on another branch or mid-rebase.
+    if run("status", "--porcelain", "--untracked-files=no").stdout.strip():
+        sys.exit(f"Uncommitted changes in {path}; commit or stash first.")
+
+    source = mr["source_branch"]
+    fork = mr.get("source_project_id") != mr.get("target_project_id")
+    if fork:
+        # Fork branches are not on origin; GitLab mirrors every MR head under
+        # refs/merge-requests. A namespaced local branch keeps a fork's "main"
+        # from clashing with ours.
+        branch = f"mr/{mr['iid']}"
+        upstream = f"refs/remotes/origin/{branch}"
+        run("fetch", "origin", f"+refs/merge-requests/{mr['iid']}/head:{upstream}")
+    else:
+        branch = source
+        upstream = f"refs/remotes/origin/{source}"
+        run("fetch", "origin", source)
+
+    if (
+        run(
+            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False
+        ).returncode
+        == 0
+    ):
+        run("switch", branch)
+        if run("merge", "--ff-only", upstream, check=False).returncode != 0:
+            # Force-pushed upstream: the reflog of the upstream ref tells which
+            # local commits were really ours (as `git pull --rebase` does).
+            fp = run("merge-base", "--fork-point", upstream, "HEAD", check=False)
+            fork_point = fp.stdout.strip()
+            if fp.returncode != 0 or not fork_point:
+                sys.exit(
+                    f"{branch} diverged from {upstream} (no fork point); resolve manually."
+                )
+            if fork_point == run("rev-parse", "HEAD").stdout.strip():
+                run("reset", "--keep", upstream)
+            else:
+                print(f"Replaying local commits onto {upstream}", file=sys.stderr)
+                run("rebase", "--onto", upstream, fork_point)
+    elif fork:
+        # No tracking: the MR ref is read-only, nothing to push back to.
+        run("switch", "-c", branch, "--no-track", upstream)
+    else:
+        run("switch", "-c", branch, "--track", f"origin/{source}")
+    # A main-repo MR may move submodule pointers.
+    if path == ".":
+        run("submodule", "update", "--init", "--recursive")
+    return branch
+
+
+def cmd_mr_checkout(args: argparse.Namespace) -> None:
+    repo, iid = parse_ref(repo_from_cwd(), args.ref)
+    mr = get_mr(repo, iid)
+    branch = checkout_mr(mr, repo.path)
+    print(f"!{mr['iid']}: on {branch} in {repo.path}")
+    if args.review:
+        review_assign(repo, mr)
 
 
 def guess_target(repo: Repo, branch: str) -> str:
@@ -453,8 +564,9 @@ def guess_target(repo: Repo, branch: str) -> str:
 def cmd_mr_target(args: argparse.Namespace) -> None:
     """Print ``origin/<target>``; exit 1 when unknown, 2 on a protected branch."""
     repo = repo_from_cwd()
-    if args.iid is not None:
-        mrs = [get_mr(repo, args.iid)]
+    if args.ref is not None:
+        repo, iid = parse_ref(repo, args.ref)
+        mrs = [get_mr(repo, iid)]
     else:
         branch = git("branch", "--show-current", check=False)
         if not branch:
@@ -462,7 +574,7 @@ def cmd_mr_target(args: argparse.Namespace) -> None:
         mrs = mrs_for_branch(repo, branch)
     if mrs and mrs[0].get("target_branch"):
         print(f"origin/{mrs[0]['target_branch']}")
-    elif args.iid is not None:
+    elif args.ref is not None:
         sys.exit(1)
     else:
         print(guess_target(repo, branch))
@@ -470,7 +582,11 @@ def cmd_mr_target(args: argparse.Namespace) -> None:
 
 def cmd_mr_approve(args: argparse.Namespace) -> None:
     repo = repo_from_cwd()
-    mr = resolve_mr(repo, args.iid)
+    if args.ref is not None:
+        repo, iid = parse_ref(repo, args.ref)
+        mr = get_mr(repo, iid)
+    else:
+        mr = resolve_mr(repo, None)
     print(f"Approving MR !{mr['iid']}: {mr.get('title', '')}\n  {mr_url(repo, mr)}")
     if args.message:
         or_exit(
@@ -813,17 +929,23 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--json", action="store_true", help="Print full MR data as JSON.")
     ls.set_defaults(fn=cmd_mr_list)
 
+    co = mr.add_parser("checkout", help="Check out an MR's source branch.")
+    co.add_argument("ref", metavar="REF")
+    co.add_argument(
+        "-r", "--review", action="store_true", help="Also assign yourself as reviewer."
+    )
+    co.set_defaults(fn=cmd_mr_checkout)
+
     ra = mr.add_parser("review-assign", help="Assign yourself as reviewer.")
-    ra.add_argument("iid", type=int)
-    ra.add_argument("--project", help="GitLab project path (a submodule of this repo).")
+    ra.add_argument("ref", metavar="REF")
     ra.set_defaults(fn=cmd_mr_review_assign)
 
     tg = mr.add_parser("target", help="Print the MR target ref.")
-    tg.add_argument("iid", type=int, nargs="?")
+    tg.add_argument("ref", metavar="REF", nargs="?")
     tg.set_defaults(fn=cmd_mr_target)
 
     ap = mr.add_parser("approve", help="Approve the MR.")
-    ap.add_argument("iid", type=int, nargs="?")
+    ap.add_argument("ref", metavar="REF", nargs="?")
     ap.add_argument("-m", "--message", help="General comment to post first.")
     ap.set_defaults(fn=cmd_mr_approve)
 

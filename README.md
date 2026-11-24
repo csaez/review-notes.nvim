@@ -397,6 +397,7 @@ own:
 
 ```sh
 git-lab mr list                  # open MRs of this repository
+git-lab mr checkout '!123'       # check out an MR (also group/project!123, URL)
 git-lab mr target                # the target branch of the current MR
 git-lab mr approve -m "LGTM"
 git-lab comment list             # threads, with lines mapped to the files on disk
@@ -407,6 +408,13 @@ git-lab review submit            # publish pending draft comments
 It finds the project from the `origin` remote and the merge request from the
 current branch. Set `GITLAB_HOST` to override the host. Run `git-lab --help`
 for everything.
+
+`mr list` prints one MR per line, starting with its reference, so a picker
+works as a one-liner (`--recursive` includes submodules):
+
+```sh
+git-lab mr checkout "$(git-lab mr list --recursive | fzf | cut -f1)"
+```
 
 To install it, put it on your `PATH` and give it a token with `api` scope:
 
