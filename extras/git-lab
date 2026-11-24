@@ -13,7 +13,11 @@ Subcommands:
                             force-push. --review: also assign yourself as
                             reviewer.
     mr review-assign REF    Add yourself as reviewer of the MR.
-    mr target [REF]         Print the MR target ref (origin/<branch>) for scripting.
+    mr target [REF] [--refresh]
+                            Print the MR target ref (origin/<branch>) for scripting.
+                            The current branch's target is cached in
+                            branch.<name>.gitlab-target (set by checkout too);
+                            --refresh asks GitLab and updates it.
     mr approve [REF] [-m MSG]
                             Approve the MR of the current branch, optionally commenting.
     comment list [--mr IID] [--json]
@@ -100,6 +104,17 @@ def current_branch() -> str:
     if not branch:
         sys.exit("Not on a named branch -- cannot auto-detect the MR.")
     return branch
+
+
+def target_key(branch: str) -> str:
+    return f"branch.{branch}.gitlab-target"
+
+
+def store_target(branch: str, target: str, cwd: str | None = None) -> None:
+    """Cache *target* in the branch config; git drops it with the branch."""
+    key = target_key(branch)
+    if git("config", "--get", key, cwd=cwd, check=False) != target:
+        git("config", key, target, cwd=cwd, check=False)
 
 
 def parse_remote(url: str) -> tuple[str, str] | None:
@@ -525,6 +540,8 @@ def cmd_mr_checkout(args: argparse.Namespace) -> None:
     repo, iid = parse_ref(repo_from_cwd(), args.ref)
     mr = get_mr(repo, iid)
     branch = checkout_mr(mr, repo.path)
+    if mr.get("target_branch"):
+        store_target(branch, f"origin/{mr['target_branch']}", cwd=repo.path)
     print(f"!{mr['iid']}: on {branch} in {repo.path}")
     if args.review:
         review_assign(repo, mr)
@@ -563,21 +580,32 @@ def guess_target(repo: Repo, branch: str) -> str:
 
 def cmd_mr_target(args: argparse.Namespace) -> None:
     """Print ``origin/<target>``; exit 1 when unknown, 2 on a protected branch."""
-    repo = repo_from_cwd()
     if args.ref is not None:
-        repo, iid = parse_ref(repo, args.ref)
-        mrs = [get_mr(repo, iid)]
-    else:
-        branch = git("branch", "--show-current", check=False)
-        if not branch:
+        repo, iid = parse_ref(repo_from_cwd(), args.ref)
+        target = get_mr(repo, iid).get("target_branch")
+        if not target:
             sys.exit(1)
-        mrs = mrs_for_branch(repo, branch)
+        print(f"origin/{target}")
+        return
+    branch = current_branch()
+    # Targets rarely change: answer from the cache and let callers refresh it
+    # in the background. Unknown/protected results are not cached.
+    cached = git("config", "--get", target_key(branch), check=False)
+    if cached and not args.refresh:
+        print(cached)
+        return
+    repo = repo_from_cwd()
+    mrs = mrs_for_branch(repo, branch)
     if mrs and mrs[0].get("target_branch"):
-        print(f"origin/{mrs[0]['target_branch']}")
-    elif args.ref is not None:
-        sys.exit(1)
+        target = f"origin/{mrs[0]['target_branch']}"
+    elif cached:
+        # No MR by this name (a fork MR's mr/IID, or merged): a guess must not
+        # replace what checkout or a real MR stored.
+        target = cached
     else:
-        print(guess_target(repo, branch))
+        target = guess_target(repo, branch)
+    store_target(branch, target)
+    print(target)
 
 
 def cmd_mr_approve(args: argparse.Namespace) -> None:
@@ -942,6 +970,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     tg = mr.add_parser("target", help="Print the MR target ref.")
     tg.add_argument("ref", metavar="REF", nargs="?")
+    tg.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ask GitLab even when cached, updating the cache.",
+    )
     tg.set_defaults(fn=cmd_mr_target)
 
     ap = mr.add_parser("approve", help="Approve the MR.")

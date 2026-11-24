@@ -398,7 +398,8 @@ own:
 ```sh
 git-lab mr list                  # open MRs of this repository
 git-lab mr checkout '!123'       # check out an MR (also group/project!123, URL)
-git-lab mr target                # the target branch of the current MR
+git-lab mr target                # the target branch of the current MR (cached)
+git-lab mr target --refresh      # ask GitLab again, updating the cache
 git-lab mr approve -m "LGTM"
 git-lab comment list             # threads, with lines mapped to the files on disk
 git-lab comment add src/a.c:12 "why?"
