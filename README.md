@@ -1,29 +1,34 @@
 # review-notes.nvim
 
 Code review for Neovim that lives in a plain text file, not in your code. The
-threads of a review (yours, your peers', an agent's) show up right under the
-code they are about, and one file ties them to the merge request on the
-remote.
+threads of a review (yours, your peers', an agent's) are in one place, the
+review's home, and one file ties them to the merge request on the remote.
 
 Reading never sends anything. You pull to see what changed, write comments
 locally, and publish when you are ready. Because the notes are a markdown
 file, scripts and coding agents can read and answer them too.
 
 ```
-  src/http.cpp
-  88   auto t = connect_timeout;
-       3 comments, @bob: matches the studio default  [unsent]
-  120  return read(fd, buf, n);
+Review  feature/timeouts  !123 -> main                 | # src/http.cpp:120-124
+  Timeouts for the HTTP client                         | ! unread, 2 comments
+1 unread  1 proposed  4 open    pulled 3 min ago       |
+                                                       | ### @alice
+! Unread (1)                                           | why 30s?
+  src/http.cpp:120-124  @alice: why 30s?               |
+* Proposed (1)                                         | ### me (proposed)
+  src/http.cpp:88       me (proposed): connect too     | Matches the studio default
 ```
 
 ## Features
 
-- **Threads under the code.** In review mode each thread is a line under its
-  anchor, `<CR>` expands it into the conversation. One toggle hides all of it
-  when you want to focus on the code.
+- **A home for the review.** `:Review` lists every thread by urgency (unread,
+  proposed, not published, open, resolved) and holds the review-wide actions:
+  pull, publish, approve all, the merge request.
+- **A panel for the thread.** One thread at a time in a split, with its code
+  next to it. Reply, resolve, approve, discard and move on with one key each.
+- **Signs in the code.** A mark on each anchor, nothing else in your buffers.
 - **One kind of thread.** Comments on a line, a range, a file or the whole
-  change are all threads. The ones on the whole change (and on a file) sit in
-  a labelled header above line 1.
+  change are all threads, and all work the same way.
 - **Pull is safe.** It never sends anything and never touches your text, so it
   is fine to run in the middle of a peer or an agent adding comments.
 - **Publish is one deliberate step.** It shows what it will send, asks, and
@@ -37,8 +42,7 @@ file, scripts and coding agents can read and answer them too.
   own file, `.git/review/<branch>.md`. Any other file gets a sibling
   `<file>.review.md`, local only.
 - **Follows your edits.** Anchors move with the code, saving writes the new
-  lines back. Works next to gitsigns, diff pickers and hunk previews: it is
-  only extmarks.
+  lines back. Works next to gitsigns, diff pickers and hunk previews.
 - **Pluggable backend.** All remote work goes through command lines you
   configure. A GitLab one ships as an extra.
 
@@ -48,6 +52,7 @@ file, scripts and coding agents can read and answer them too.
 - git
 - A [Nerd Font](https://www.nerdfonts.com/), for the default icons
 - To sync: a backend, such as the [git-lab extra](#git-lab)
+- Optional: [snacks.nvim](https://github.com/folke/snacks.nvim) for the picker
 
 ## Installation
 
@@ -56,104 +61,106 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "csaez/review-notes.nvim",
-  lazy = false, -- threads are drawn when files open, so load at startup
+  lazy = false, -- signs are drawn when files open, so load at startup
   opts = {},
   keys = {
-    { "<leader>rv", function() require("review_notes").toggle() end, desc = "Review: show / hide threads" },
-    { "<leader>rn", function() require("review_notes").add() end, mode = { "n", "x" }, desc = "Review: reply or new thread" },
-    { "<leader>rN", function() require("review_notes").add_general() end, desc = "Review: thread on the whole change" },
-    { "<leader>rg", function() require("review_notes").reply_general() end, desc = "Review: reply in the header" },
-    { "<leader>rl", function() require("review_notes").list() end, desc = "Review: list threads" },
-    { "<leader>rr", function() require("review_notes").pull() end, desc = "Review: pull from the remote" },
-    { "<leader>rp", function() require("review_notes").publish() end, desc = "Review: publish" },
-    { "<leader>rx", function() require("review_notes").toggle_resolved() end, desc = "Review: resolve / reopen" },
-    { "<leader>ra", function() require("review_notes").approve() end, desc = "Review: approve proposed" },
-    { "<leader>rt", function() require("review_notes").thread() end, desc = "Review: thread in the panel" },
-    { "]r", function() require("review_notes").jump_unread(1) end, desc = "Review: next unread" },
-    { "[r", function() require("review_notes").jump_unread(-1) end, desc = "Review: previous unread" },
+    { "<leader>rr", function() require("review_notes").home() end, desc = "Review: home" },
+    { "<leader>rt", function() require("review_notes").thread() end, desc = "Review: thread here" },
+    { "<leader>rn", function() require("review_notes").new() end, mode = { "n", "x" }, desc = "Review: new thread" },
+    { "<leader>rN", function() require("review_notes").new_change() end, desc = "Review: new thread on the change" },
+    { "<leader>rf", function() require("review_notes.snacks").open() end, desc = "Review: find threads" },
+    { "]r", function() require("review_notes").next(1) end, desc = "Review: next thread (unread first)" },
+    { "[r", function() require("review_notes").next(-1) end, desc = "Review: previous thread" },
   },
 }
 ```
 
-The plugin sets no global keymaps. Binding `<CR>` globally is too greedy for
-most setups: use `<leader>re` or similar instead. `:checkhealth review_notes`
-checks that git and the backend commands are found.
+The plugin sets no global keymaps; its own buffers (the home, the panel, the
+composer) have their own keys, listed by `g?` in each.
+`:checkhealth review_notes` checks that git and the backend commands are found.
 
 ## Quick start
 
 1. Check out the branch under review and open a file.
-2. `<leader>rr` pulls the threads of the merge request. They appear under
-   their code; `<leader>rv` hides them.
-3. On a line (or a visual selection) press `<leader>rn`, write, save with
-   `<C-s>`. On a thread, the same key replies.
-4. `<leader>rp` shows what will be sent and, once you confirm, sends it.
+2. `<leader>rr` opens the home; `p` pulls the threads of the merge request.
+3. `<CR>` on a thread shows it in the panel, with its code in the window you
+   came from. `r` replies, `x` resolves, `]t` moves to the next one.
+4. In the code, `<leader>rn` on a line (or a visual selection) starts a new
+   thread: write, save with `<C-s>`.
+5. Back in the home, `P` shows what will be sent and, once you confirm, sends it.
 
 ## Usage
 
-### Reading
+### The home
 
-In review mode a thread is one line under its last anchor line, with an icon
-for its most urgent state: unread, proposed, not published, open, resolved.
-`toggle_expand()` (on the anchor line) opens the conversation, which also
-marks it as seen. `toggle_expand_all()` does it for every thread.
+`:Review` (or `home()`) opens the review's home in the current window: the
+branch, the merge request and the counts, then the threads in sections by
+urgency, each a fold (`<Tab>`; Resolved starts folded). It redraws when the
+notes change, so a pull or an agent writing shows up live.
 
-Threads on the whole change or on a whole file are in a header above line 1,
-labelled `change` or `file <name>`, so they are never confused with a thread
-on line 1 (those are drawn below it). `toggle_expand(true)` opens the header
-from anywhere in the buffer, `reply_general()` answers in it.
+| Key       | Does                                                         |
+| --------- | ------------------------------------------------------------ |
+| `<CR>`    | show the thread in the panel (the cursor stays in the home)  |
+| `o`       | go to the code (the home's window), the panel shows the thread |
+| `r`       | reply, or edit my reply not published yet                    |
+| `x`       | resolve / reopen; accepts a resolve by someone else          |
+| `a`       | approve proposed comments                                    |
+| `d`       | discard unpublished text (asks before deleting new threads)  |
+| `R`       | mark read                                                    |
+| `p`       | pull (sends nothing)                                         |
+| `P`       | publish: summary, confirm, send                              |
+| `n`       | new thread on the whole change                               |
+| `A` / `D` | approve / discard every proposed comment                     |
+| `m`       | merge request actions (see [Configuration](#configuration))  |
+| `f`       | changed files (your function, see Configuration)             |
+| `e`       | edit the notes file                                          |
+| `q`, `g?` | close, help                                                  |
+
+`x`, `a`, `d` and `R` also take a visual selection: `Vjjx` resolves three
+threads.
 
 ### The thread panel
 
-`thread()` shows the thread at the cursor in a panel on the right (a menu
-when there are several; on line 1 the change threads count too). Pickers
-open it with `open_item(item)`, and `jump_unread(dir)` goes through it. It
-is one window, reused, and it follows: showing a thread marks it seen and
-shows its code (range highlighted) in the window you came from. The panel
-redraws when the notes change, so a pull or pi writing shows up live.
+One thread at a time, in a split on the right that is reused. Showing a
+thread marks it seen and shows its code (range highlighted) in the window you
+came from; threads on the whole change are threads like any other here.
 
-| Key        | In the panel                                          |
+| Key        | Does                                                  |
 | ---------- | ----------------------------------------------------- |
-| `r`        | reply, or edit my reply not published yet             |
-| `x`        | resolve / reopen; accepts a resolve by someone else   |
+| `r`        | reply (the composer opens in the panel)               |
+| `x`        | resolve / reopen                                      |
 | `a`        | approve the proposed comment                          |
 | `d`        | discard my unpublished text (asks for a new thread, which goes entirely) |
-| `]t` `[t`  | next / previous thread (the picker's order)           |
+| `]t` `[t`  | next / previous thread (the home's order)             |
 | `]u` `[u`  | next / previous unread                                |
 | `o`        | go to the code                                        |
-| `q`        | close                                                 |
-| `g?`       | help                                                  |
+| `q`, `g?`  | close, help                                           |
 
-### Writing
+### In the code
 
-`add()` opens a small float: on a thread it is your reply, elsewhere a new
-thread on the line or the selected lines. `<C-s>` or `:w` saves it into the
-notes file (nothing is sent), `q` closes. Saving again edits your pending
-comment; saving it empty removes it. `add_general()` starts a thread on the
-whole change, `add_general(true)` on the current file.
+Each thread on a line or range has a sign: a bar down the range, the icon of
+its most urgent state on the last line. `signs = false` hides them.
 
-| Function                | Does                                                   |
-| ----------------------- | ------------------------------------------------------ |
-| `toggle_resolved()`     | resolve or reopen (sent by publish); on a thread someone else resolved it first accepts it |
-| `mark_read()`           | mark the thread as seen                                |
-| `approve(all?)`         | approve proposed comments of the thread (or all)       |
-| `discard()`             | delete the unpublished part of the thread (mine, proposed, an unsent resolve); a thread never published is removed entirely |
-| `discard_proposed()`    | delete every proposed (tool) comment, threads it started included |
-| `jump(dir)`             | next / previous thread in the buffer                   |
-| `jump_unread(dir)`      | next / previous unread thread across the review        |
+| Function        | Does                                                         |
+| --------------- | ------------------------------------------------------------ |
+| `thread()`      | the thread at the cursor in the panel (a menu if several)    |
+| `new()`         | new thread on the line or the visual range, even where one is |
+| `new_change()`  | new thread on the whole change                               |
+| `next(dir)`     | next / previous unread thread across the review; with nothing unread, the next thread in the buffer |
+
+The composer is a small markdown float: `<C-s>` or `:w` saves into the notes
+file (nothing is sent), `q` closes. Saving again edits your pending comment;
+saving it empty removes it.
 
 ### Commands
 
 | Command            | What it does                                              |
 | ------------------ | --------------------------------------------------------- |
-| `:Review`          | toggle review mode                                        |
+| `:Review`          | the home                                                  |
 | `:Review pull`     | bring the remote threads in; never sends                  |
 | `:Review publish`  | pull, show what would be sent, confirm, send, pull        |
-| `:Review list`     | the threads in the quickfix list                          |
-| `:Review approve [all]` | approve proposed comments                            |
-| `:Review discard [proposed]` | delete the unpublished part of the thread, or every proposed comment |
-| `:Review expand`   | expand or collapse every thread                           |
 | `:Review thread`   | the thread at the cursor in the panel                     |
-| `:Review open`     | open the notes file                                       |
+| `:Review edit`     | the notes file                                            |
 
 ## How syncing works
 
@@ -226,7 +233,6 @@ The full grammar is at the top of
 
 ```lua
 require("review_notes").setup({
-  visible = true, -- start in review mode
   signs = true,   -- gutter marks on the anchors
   watch = true,   -- redraw when a notes file changes (an agent, a pull)
   -- Command lines run in the repository root. {path}, {line}, {thread} and
@@ -242,6 +248,21 @@ require("review_notes").setup({
     submit    = { "git-lab", "review", "submit", "--only", "{ids}", "--json" },
     discard   = { "git-lab", "review", "discard", "--only", "{ids}" },
   },
+  -- The merge request in the home (false: none). `info` prints JSON with
+  -- ref, title, url, target; `actions` are under `m`. A `cmd` runs in the
+  -- repository root with {url}, {ref}, {target} filled in from `info`, and
+  -- {input} asked for first (left out with the option before it if empty).
+  mr = {
+    info = { "git-lab", "mr", "info", "--json" },
+    actions = {
+      { key = "a", desc = "approve the MR (optional comment)", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
+      { key = "o", desc = "open in the browser", fn = function(mr) vim.ui.open(mr.url) end },
+    },
+  },
+  -- `f` in the home: the changed files, with your picker. Not set by default.
+  files = function(review)
+    Snacks.picker.git_diff({ base = review.mr and review.mr.target })
+  end,
 })
 ```
 
@@ -279,81 +300,31 @@ require("review_notes").setup({
 
 ## Picker
 
-The plugin has no picker of its own. `require("review_notes").items(buf)`
-returns every thread of the buffer's review, urgent first, as one kind of row
-(the change threads are rows like any other). Each item has `file`, `line`,
+`require("review_notes.snacks")` is a [snacks.nvim](https://github.com/folke/snacks.nvim)
+source for the threads of the current review. `open()` opens it; to list it
+among your pickers, register `source`:
+
+```lua
+picker = { sources = { review_notes = require("review_notes.snacks").source } }
+```
+
+`<CR>` shows the thread in the panel. The other keys match the panel:
+`<a-o>` go to the code, `<a-r>` reply, `<a-x>` resolve, `<a-a>` approve,
+`<a-d>` discard, `<a-m>` mark read.
+
+For another picker, `require("review_notes").items(buf)` returns every thread
+of the buffer's review, urgent first. Each item has `file`, `line`,
 `end_line`, `kind` (`change`, `file` or `line`), `anchor`, `state`, `icon`,
-`hl`, `tags`, `summary`, `thread` (the conversation as markdown lines, for a
-preview) and `text` (searchable). A thread on a directory (a submodule's
-pointer change) points at its heading in the notes file instead.
+`hl`, `tags`, `who`, `summary`, `thread` (the conversation as markdown lines,
+for a preview) and `text` (searchable). Threads with no code (the whole
+change, a directory such as a submodule) point at their heading in the notes
+file.
 
 - `open_item(item)` shows the thread in the panel and its code in the
   current window, and marks it seen.
-- `goto_item(item)` only goes there.
-- `item_action(item, "resolve" | "read" | "approve" | "discard")` acts without leaving
-  the picker. Refresh its items afterwards.
-
-<details>
-<summary>A snacks.nvim source</summary>
-
-```lua
-picker = {
-  sources = {
-    review_notes = {
-      title = "Review threads",
-      finder = function(_, ctx)
-        local items = require("review_notes").items(ctx.filter.current_buf)
-        for _, item in ipairs(items) do
-          item.pos, item.end_pos = { item.line, 0 }, { item.end_line, 0 }
-        end
-        return items
-      end,
-      format = function(item, picker)
-        local ret = { { item.icon .. " ", item.hl } }
-        if item.kind == "change" then
-          table.insert(ret, { "change  ", "SnacksPickerDir" })
-        else
-          vim.list_extend(ret, Snacks.picker.format.filename(item, picker))
-        end
-        for _, tag in ipairs(item.tags) do
-          table.insert(ret, { "[" .. tag .. "] ", "SnacksPickerComment" })
-        end
-        table.insert(ret, { item.summary, "ReviewText" })
-        return ret
-      end,
-      preview = function(ctx)
-        ctx.preview:reset()
-        ctx.preview:set_lines(ctx.item.thread)
-        ctx.preview:highlight({ ft = "markdown" })
-      end,
-      confirm = function(picker, item)
-        picker:close()
-        if item then require("review_notes").open_item(item) end
-      end,
-      actions = {
-        review_resolve = function(picker, item)
-          if item then require("review_notes").item_action(item, "resolve") end
-          picker:find()
-        end,
-        review_approve = function(picker, item)
-          if item then require("review_notes").item_action(item, "approve") end
-          picker:find()
-        end,
-      },
-      win = {
-        input = {
-          keys = {
-            ["<a-r>"] = { "review_resolve", mode = { "n", "i" }, desc = "resolve / reopen" },
-            ["<a-a>"] = { "review_approve", mode = { "n", "i" }, desc = "approve proposed" },
-          },
-        },
-      },
-    },
-  },
-},
-```
-
-</details>
+- `goto_item(item)` only goes to the code.
+- `item_action(item, "resolve" | "read" | "approve" | "discard")` acts without
+  leaving the picker. Refresh its items afterwards.
 
 ## Statusline
 
@@ -370,8 +341,9 @@ sections = { lualine_x = { function() return require("review_notes").status() en
 Icons and groups are in `require("review_notes").style`, one per state
 (`unread`, `proposed`, `unsent`, `open`, `resolved`). The groups are defined
 with `default = true`, so your colorscheme can override them: `ReviewUnread`,
-`ReviewProposed`, `ReviewUnsent`, `ReviewOpen`, `ReviewResolved`, `ReviewBar`,
-`ReviewAuthor`, `ReviewMine`, `ReviewText`, `ReviewHeader`.
+`ReviewProposed`, `ReviewUnsent`, `ReviewOpen`, `ReviewResolved`,
+`ReviewAuthor`, `ReviewMine`, `ReviewText`, `ReviewRange` (the code of the
+thread in the panel).
 
 ## Extras
 
@@ -391,6 +363,7 @@ git-lab mr checkout '!123'       # check out an MR (also group/project!123, URL)
 git-lab mr target                # the target branch of the current MR (cached)
 git-lab mr target --refresh      # ask GitLab again, updating the cache
 git-lab mr approve -m "LGTM"
+git-lab mr info --json           # the current MR: ref, title, url, target
 git-lab comment list             # threads, with lines mapped to the files on disk
 git-lab comment add src/a.c:12 "why?"
 git-lab review submit            # publish pending draft comments
@@ -440,7 +413,8 @@ same notes files:
 pi acts on its own findings without waiting for approval: approval is only
 the gate before something goes to the merge request. Everything pi writes is
 a `### me (proposed)` comment, which publish never sends until you approve it
-(`approve`, or `approve all`), so a round of pi is safe at any time. To
+(`a` in the panel or the home, `A` for all), so a round of pi is safe at
+any time. To
 install it, link or copy it into `~/.pi/agent/extensions/`.
 
 ## Development

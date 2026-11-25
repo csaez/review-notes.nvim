@@ -272,7 +272,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
     `${limit} Skip findings without a concrete action.`;
 
   // Proposed comments are never published until the human approves them
-  // (`:Review approve`), or discards them, so every finding gets read against
+  // (`a` or `A` in the review home), or discards them, so every finding gets read against
   // the code.
   const appendFindings = (notesFile: string, path: string, rules: string[]): string =>
     `Append to \`${notesFile}\` (create it if missing). Never change existing content; skip ` +
@@ -473,7 +473,7 @@ ${bullets([
   // Findings are appended to the notes file as threads with a proposed
   // comment, next to the human's own notes. Proposed means "not approved yet":
   // publish and /fixup skip those threads until the human approves them
-  // (`:Review approve`) or discards them, so every finding gets read against
+  // (`a` or `A` in the review home) or discards them, so every finding gets read against
   // the code.
   //
   // The argument is free text (scope, ticket, focus, blast radius), read by the

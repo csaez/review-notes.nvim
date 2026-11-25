@@ -3,7 +3,6 @@
 local M = {}
 
 ---@class review_notes.Config
----@field visible boolean show the thread text (review mode) at startup
 ---@field signs boolean sign column marks on the anchors
 ---@field watch boolean redraw when a notes file changes on disk
 ---@field backend table<string, string[]> Command lines, run in the repo root.
@@ -42,7 +41,6 @@ local M = {}
 
 ---@type review_notes.Config
 M.values = {
-  visible = true,
   signs = true,
   watch = true,
   backend = {

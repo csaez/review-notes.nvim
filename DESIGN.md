@@ -1,8 +1,8 @@
 # review-notes.nvim: design
 
-Status: v2 (model, file format, pull and publish) is implemented. v3 (the
-UI: a review home and a thread panel instead of virtual lines) is agreed
-and not implemented yet; the sections below describe v3 where they differ.
+Status: v2 (model, file format, pull and publish) and v3 (the UI: a review
+home and a thread panel instead of virtual lines) are implemented; the
+sections below describe v3 where they differ.
 The README is the user documentation. Backward compatibility of commands,
 keymaps and options is not a goal; the notes file format stays.
 
@@ -146,7 +146,7 @@ p pull  P publish  m MR  f files  n new  <CR> open  ? help
   Resolved starts folded. A thread is one line: icon, anchor (path relative
   to the repo, `change` for the whole change), last comment.
 - `<CR>` opens the thread in the panel and keeps the cursor in the home;
-  `o` goes to the code (and opens the panel). `<Tab>` toggles a section.
+  `o` goes to the code in the home's window (and opens the panel). `<Tab>` toggles a section.
 - Thread keys (below) also work on the thread under the cursor, and on a
   visual selection of threads (`x` on five lines resolves five threads).
 - Review-wide keys:
@@ -177,11 +177,12 @@ mr = {
     { key = "a", desc = "approve", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
     { key = "o", desc = "browser", fn = function(mr) vim.ui.open(mr.url) end },
   },
-},
+}, -- the default; false for none
 files = function(review) Snacks.picker.git_diff({ base = review.mr.target }) end,
 ```
 
-`{input}` asks for a line of text first (empty is fine). Checkout of
+`{input}` asks for a line of text first; empty leaves it out, with the
+option before it (`-m`). Checkout of
 another MR stays outside: it changes which review is current, so it belongs
 to a global key (`<leader>rm` in the user config), not to the home of the
 current one.
@@ -245,7 +246,7 @@ Global keys the README suggests (the plugin sets none):
 | `<leader>rn` | new thread on the line, or the visual range              |
 | `<leader>rN` | new thread on the whole change                           |
 | `<leader>rf` | the picker                                               |
-| `]r` / `[r`  | next / previous thread in the code, unread first         |
+| `]r` / `[r`  | next / previous unread across the review (in the panel); with nothing unread, the next thread in the buffer |
 
 `<leader>rn` always starts a new thread, even on a line that has one;
 replies are `r` in the panel. v2's `add` did both, depending on the cursor.
@@ -267,14 +268,14 @@ Everything else is a key in the home or the panel, or a Lua function
 A finder, not a hub: the home is the hub. The plugin ships the snacks
 source (`require("review_notes.snacks").source`) so user config is one line,
 and the source binds the thread keys from `actions` as `<a-r>`, `<a-x>`,
-`<a-a>`, `<a-d>` (the same letters as the panel). `<CR>` opens the panel on
-the thread. `items(buf)` stays the API for other pickers, and quickfix
-(`:Review list`) goes away: the home replaces it.
+`<a-a>`, `<a-d>`, `<a-m>` (mark read), `<a-o>` (code): the panel's letters. `<CR>` opens the panel on
+the thread. `items(buf)` stays the API for other pickers. The quickfix list
+(`:Review list`) is gone: the home replaces it.
 
 ## Writing
 
-The composer is the v2 float, opened under the panel's last line (or the
-cursor, for `<leader>rn` in code). `<C-s>` or `:w` saves, `q` closes and
+The composer is the v2 float, opened at the bottom of the panel, at its
+width (or under the cursor, for `<leader>rn` in code and `r` in the home). `<C-s>` or `:w` saves, `q` closes and
 keeps the text for next time. New thread on a line or range from the code;
 new change thread from the home (`n`) or `<leader>rN`; reply from the
 panel or the home (`r`).
@@ -357,7 +358,9 @@ Mostly as before, with these changes:
 | `store.lua`       | parse and write the markdown file and the sidecar, atomic  |
 | `merge.lua`       | pull merge and publish plan, pure functions, fully tested  |
 | `backend.lua`     | run the commands, the JSON contract                        |
-| `review.lua`      | the current review: context, items, sorting, watcher       |
+| `config.lua`      | the options                                                |
+| `review.lua`      | the current review: context, items, sorting, watcher, change listeners |
+| `sync.lua`        | pull and publish                                           |
 | `actions.lua`     | the verbs, on items: resolve, approve, discard, reply, ... |
 | `home.lua`        | the home buffer                                            |
 | `panel.lua`       | the thread panel                                           |
@@ -367,8 +370,8 @@ Mostly as before, with these changes:
 | `init.lua`        | setup, commands, public API (thin)                         |
 
 `actions` is the one place a verb lives; the home, the panel and the picker
-bind keys to it and refresh after. `view.lua` (virtual lines, header,
-expand state, `topfill`) goes away.
+bind keys to it. Every change goes through `review.edit`, which tells the
+listeners (code signs, the home, the panel), so nothing refreshes by hand.
 
 `merge.lua` and `store.lua` have no Neovim dependencies, so most of the
 logic is testable in plain Lua, and a fake backend script covers the rest.
@@ -383,15 +386,15 @@ logic is testable in plain Lua, and a fake backend script covers the rest.
 - Because proposed comments never publish without approval, running it in
   the middle of a pull from a peer is harmless.
 
-## Plan (v3)
+## Plan (v3), done
 
-1. Split `init.lua`: `review.lua` and `actions.lua` out, no behaviour change
-   (tests stay green).
-2. `panel.lua`, then `home.lua` on top of `actions`.
-3. `signs.lua` replaces `view.lua`; remove the header, expand state and
-   their autocmds.
-4. `snacks.lua` source; MR hooks (`git-lab mr info --json` to add).
-5. Commands and README; trim the user config to the suggested keys.
+1. Split `init.lua`: `review.lua`, `actions.lua`, `sync.lua`, `config.lua`.
+2. `panel.lua`.
+3. `home.lua` on top of `actions`; `git-lab mr info --json`.
+4. `signs.lua` replaces `view.lua`; the header, the expand state and their
+   autocmds are gone, with `toggle`, `add`, `add_general`, `reply_general`,
+   `toggle_expand*`, `approve`, `discard*`, `list`, `jump*`, `open`.
+5. `snacks.lua` source, commands, README.
 
 ## Decisions
 

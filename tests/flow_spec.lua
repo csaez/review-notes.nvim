@@ -195,7 +195,7 @@ describe("discard", function()
   end)
 
   it("discard proposed clears them all and keeps the remote ones", function()
-    review.discard_proposed()
+    require("review_notes.actions").discard_proposed(require("review_notes.review").context())
     local d = store.parse(store.read_lines(notes_path))
     assert.are.equal(1, #d.threads)
     assert.are.equal("open", d.threads[1].status)
