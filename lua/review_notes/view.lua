@@ -201,6 +201,7 @@ end
 ---@param rel string path of the buffer's file, as in anchors
 ---@param visible boolean review mode: the thread text
 ---@param opts review_notes.RenderOpts
+---@return integer header height: the screen lines the header takes above line 1
 function M.render(buf, entries, rel, visible, opts)
   local keep = opts.buf_rows or {}
   M.clear(buf)
@@ -262,7 +263,7 @@ function M.render(buf, entries, rel, visible, opts)
     end
   end
 
-  if not visible then return end
+  if not visible then return 0 end
 
   -- Text of the threads under their last line, one block per row.
   local below = {} ---@type table<integer, table[]>
@@ -284,6 +285,26 @@ function M.render(buf, entries, rel, visible, opts)
       vim.list_extend(lines, M.thread_lines(d.entry, opts.expanded[d.entry.key] == true, width, true, ""))
     end
     vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { virt_lines = lines, virt_lines_above = true })
+    return #lines
+  end
+  return 0
+end
+
+--- Lines above line 1 are only on screen when the window is scrolled into
+--- them (topfill); a window at the top would otherwise hide the header.
+---@param buf integer
+---@param height integer
+function M.show_header(buf, height)
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    vim.api.nvim_win_call(win, function()
+      local v = vim.fn.winsaveview()
+      -- Never more than half the window: the code must stay in view.
+      local shown = math.min(height, math.max(1, math.floor(vim.api.nvim_win_get_height(win) / 2)))
+      if v.topline == 1 and v.topfill ~= shown then
+        v.topfill = shown
+        vim.fn.winrestview(v)
+      end
+    end)
   end
 end
 

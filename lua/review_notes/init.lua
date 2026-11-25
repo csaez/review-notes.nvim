@@ -222,12 +222,13 @@ local function redraw_buffer(buf, memo)
   local doc, side = read_review(ctx)
   local entries = entries_of(doc, side)
   counts[ctx.path] = tally(entries)
-  view.render(buf, entries, note_path(vim.api.nvim_buf_get_name(buf), ctx.root), visible, {
+  local height = view.render(buf, entries, note_path(vim.api.nvim_buf_get_name(buf), ctx.root), visible, {
     expanded = expanded[ctx.path] or {},
     signs = M.config.signs,
     -- Unsaved edits: the file's lines are stale, keep where the threads are.
     buf_rows = vim.bo[buf].modified and view.live_rows(buf) or nil,
   })
+  view.show_header(buf, height)
   watch(ctx.path)
 end
 
@@ -473,12 +474,15 @@ function M.toggle_expand(header)
   if not ctx then return end
   local list = threads_here(buf, header)
   if #list == 0 then return notify("no thread here") end
-  local open = not (expanded[ctx.path] or {})[list[1].entry.key]
-  for _, a in ipairs(list) do
+  local function toggle(a)
+    local open = not (expanded[ctx.path] or {})[a.entry.key]
     set_expanded(ctx, a.entry.key, open)
     if open and merge.is_unread(a.entry.thread, a.entry.state) then mark_seen(ctx, a.entry.key) end
+    M.refresh()
   end
-  M.refresh()
+  -- The header can hold many threads: open one at a time, it would fill the window.
+  if header then return choose_thread(list, "Expand", toggle) end
+  for _, a in ipairs(list) do toggle(a) end
 end
 
 --- Expand every thread, or collapse them all when all are expanded.

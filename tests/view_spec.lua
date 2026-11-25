@@ -38,6 +38,15 @@ describe("view", function()
     assert.are.same({ 1, 1 }, { above, below })
   end)
 
+  it("scrolls a window at the top into the header so it is on screen", function()
+    vim.api.nvim_set_current_buf(buf)
+    local height = view.render(buf, entries(DOC), "a.c", true, { expanded = {}, signs = false, width = 60 })
+    assert.is_true(height > 0)
+    view.show_header(buf, height)
+    assert.are.equal(height, vim.fn.winsaveview().topfill)
+    assert.are.equal(0, view.render(buf, entries(DOC), "a.c", false, { expanded = {}, signs = false, width = 60 }))
+  end)
+
   it("draws only signs when not visible, and nothing for other files' threads", function()
     view.render(buf, entries(DOC), "a.c", false, { expanded = {}, signs = true, width = 60 })
     local signs = 0
