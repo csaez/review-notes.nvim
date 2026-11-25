@@ -20,6 +20,8 @@ Subcommands:
                             --refresh asks GitLab and updates it.
     mr approve [REF] [-m MSG]
                             Approve the MR of the current branch, optionally commenting.
+    mr info [REF] --json    The MR of the current branch: {ref, iid, title, url,
+                            source, target, author, state, draft}.
     comment list [--mr IID] [--json]
                             Threads: {id, path, line, start_line, resolved,
                             resolvable, resolved_by, resolved_by_me,
@@ -628,6 +630,30 @@ def cmd_mr_approve(args: argparse.Namespace) -> None:
     print("  approved")
 
 
+def cmd_mr_info(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    if args.ref is not None:
+        repo, iid = parse_ref(repo, args.ref)
+        mr = get_mr(repo, iid)
+    else:
+        mr = resolve_mr(repo, None)
+    info = {
+        "ref": f"!{mr['iid']}",
+        "iid": mr["iid"],
+        "title": mr.get("title", ""),
+        "url": mr_url(repo, mr),
+        "source": mr.get("source_branch"),
+        "target": f"origin/{mr['target_branch']}" if mr.get("target_branch") else None,
+        "author": (mr.get("author") or {}).get("username"),
+        "state": mr.get("state"),
+        "draft": bool(mr.get("draft")),
+    }
+    if args.json:
+        print(json.dumps(info))
+    else:
+        print(f"{info['ref']} {info['title']}\n  {info['source']} -> {info['target']}\n  {info['url']}")
+
+
 # ---------------------------------------------------------------------------
 # Commands: comment, review
 # ---------------------------------------------------------------------------
@@ -1005,6 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("ref", metavar="REF", nargs="?")
     ap.add_argument("-m", "--message", help="General comment to post first.")
     ap.set_defaults(fn=cmd_mr_approve)
+
+    inf = mr.add_parser("info", help="Show the MR of the current branch.")
+    inf.add_argument("ref", metavar="REF", nargs="?")
+    inf.add_argument("--json", action="store_true")
+    inf.set_defaults(fn=cmd_mr_info)
 
     def mr_opt(sp: argparse.ArgumentParser) -> None:
         sp.add_argument(

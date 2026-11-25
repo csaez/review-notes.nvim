@@ -22,6 +22,23 @@ local M = {}
 ---               comma-separated ids they printed, so drafts queued elsewhere
 ---               stay pending; may print {published = [ids]}, also on failure
 ---    discard    optional: drops the queued {ids} that submit did not publish
+---@field mr review_notes.MrConfig? the merge request in the home; nil or false: none
+---@field files fun(review: review_notes.HomeInfo)? `f` in the home: the changed files
+
+---@class review_notes.MrConfig
+---@field info string[]? prints {ref, title, url, target, source, author} as JSON
+---@field actions review_notes.MrAction[]? under `m` in the home
+
+---@class review_notes.MrAction
+---@field key string
+---@field desc string
+---@field cmd string[]? run in the repo root; `{input}` asks for a line first,
+---  `{url}`, `{ref}`, `{target}` come from `info`
+---@field fn fun(mr: table, review: review_notes.HomeInfo)? instead of cmd
+
+---@class review_notes.HomeInfo
+---@field ctx review_notes.Context
+---@field mr table? what `mr.info` printed
 
 ---@type review_notes.Config
 M.values = {
@@ -37,6 +54,13 @@ M.values = {
     unresolve = { "git-lab", "comment", "unresolve", "{thread}" },
     submit = { "git-lab", "review", "submit", "--only", "{ids}", "--json" },
     discard = { "git-lab", "review", "discard", "--only", "{ids}" },
+  },
+  mr = {
+    info = { "git-lab", "mr", "info", "--json" },
+    actions = {
+      { key = "a", desc = "approve the MR (optional comment)", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
+      { key = "o", desc = "open in the browser", fn = function(mr) if mr.url then vim.ui.open(mr.url) end end },
+    },
   },
 }
 

@@ -81,14 +81,22 @@ local function repo_context(dir, memo)
   return memo[root] or nil
 end
 
+local bound = {} ---@type table<integer, review_notes.Context>
+
+--- Tie *buf* (a plugin buffer: the home) to *ctx*, or untie it with nil.
+---@param buf integer
+---@param ctx review_notes.Context?
+function M.bind(buf, ctx) bound[buf] = ctx end
+
 --- The review a buffer belongs to: a file in a git worktree is in its
---- branch's review, any other file has its own, next to it. Buffers that are
---- not files (the home, pickers) belong to the cwd's repo.
+--- branch's review, any other file has its own, next to it. The home has its
+--- own; other buffers that are not files (pickers) belong to the cwd's repo.
 ---@param buf integer? defaults to the current buffer
 ---@param memo table?
 ---@return review_notes.Context?
 function M.context(buf, memo)
   buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
+  if bound[buf] then return bound[buf] end
   memo = memo or {}
   local name = vim.api.nvim_buf_get_name(buf)
   if name == "" or vim.bo[buf].buftype ~= "" or name:find("/.git/", 1, true) then
@@ -257,7 +265,8 @@ M.style = {
 ---@field icon string
 ---@field hl string
 ---@field tags string[]
----@field summary string
+---@field summary string first line of the last comment
+---@field who string author of the last comment: `@name`, `me`, `me (proposed)`
 ---@field thread string[] the conversation as markdown lines, for a preview
 ---@field text string searchable text
 ---@field rank integer
@@ -302,6 +311,8 @@ function M.items(ctx)
     if f.proposed and state ~= "proposed" then table.insert(tags, "proposed") end
     if f.unsent and state ~= "unsent" then table.insert(tags, "unsent") end
     local summary = last and vim.split(last.body, "\n", { plain = true })[1] or ""
+    local who = not last and "" or last.source == "remote" and ("@" .. (last.author or "unknown"))
+      or (last.source == "proposed" and "me (proposed)" or "me")
     local file = kind == "change" and ctx.path or M.full_path(t.anchor.path, ctx.root)
     -- A submodule's pointer change is anchored on a directory: editing it
     -- would open a file explorer, show the thread in the notes instead.
@@ -319,6 +330,7 @@ function M.items(ctx)
       hl = M.style[state].hl,
       tags = tags,
       summary = summary,
+      who = who,
       thread = thread_markdown(t),
       text = table.concat({ state, store.anchor_string(t.anchor), table.concat(tags, " "), summary }, " "),
       rank = rank,

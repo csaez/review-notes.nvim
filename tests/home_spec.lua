@@ -1,0 +1,108 @@
+local review = require("review_notes")
+local panel = require("review_notes.panel")
+local store = require("review_notes.store")
+
+describe("home", function()
+  local repo, notes_path
+
+  local function doc() return store.parse(store.read_lines(notes_path)) end
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n") end
+  local function line_of(pattern)
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
+      if l:find(pattern, 1, true) then return i end
+    end
+  end
+  local function on(pattern)
+    vim.api.nvim_win_set_cursor(0, { assert(line_of(pattern), "no line with " .. pattern), 0 })
+  end
+  local function press(keys) vim.api.nvim_feedkeys(vim.keycode(keys), "x", false) end
+
+  before_each(function()
+    vim.cmd("silent! only")
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+    vim.fn.writefile({ "a", "b", "c", "d" }, repo .. "/a.c")
+    vim.cmd("cd " .. repo)
+    review.setup({ backend = {}, watch = false, mr = false })
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({
+      "## change {id=g}", "status: open", "", "### @bo {id=1}", "overall", "",
+      "## a.c:2-3 {id=t1}", "status: open", "", "### @al {id=2}", "why?", "",
+      "## a.c:4", "status: open", "", "### me (proposed)", "NIT: pi says", "",
+      "## a.c:1", "status: open", "", "### me (proposed)", "NIT: another", "",
+      "## a.c:3 {id=t2}", "status: resolved", "", "### @al {id=3}", "old", "",
+    }, notes_path)
+    store.write_sidecar(store.sidecar_path(notes_path), {
+      threads = {
+        g = { status = "open", seen = { ["1"] = true } },
+        t1 = { status = "open", seen = {} },
+        t2 = { status = "resolved", seen = { ["3"] = true }, seen_status = true },
+      },
+    })
+    vim.cmd("edit a.c")
+    local select = vim.ui.select
+    vim.ui.select = function(items, _, cb) cb(items[1]) end
+    vim.g.restore_select = select
+    review.home()
+  end)
+
+  after_each(function()
+    panel.close()
+    vim.cmd("silent! only")
+    vim.cmd("silent! %bwipeout!")
+    vim.fn.delete(repo, "rf")
+  end)
+
+  it("lists the threads by urgency, the change ones included, resolved folded", function()
+    local t = text()
+    assert.truthy(t:find("Review  main", 1, true))
+    local unread, proposed, open, resolved = line_of("Unread (1)"), line_of("Proposed (2)"), line_of("Open (1)"), line_of("Resolved (1)")
+    assert.truthy(unread and proposed and open and resolved)
+    assert.is_true(unread < proposed and proposed < open and open < resolved)
+    assert.truthy(line_of("@al: why?") > unread)
+    assert.truthy(line_of("change") > open)
+    assert.are_not.equal(-1, vim.fn.foldclosed(resolved))
+    assert.are.equal(-1, vim.fn.foldclosed(unread))
+  end)
+
+  it("starts on the first thread, and <CR> shows it in the panel without leaving", function()
+    local home = vim.api.nvim_get_current_win()
+    press("<CR>")
+    assert.is_true(panel.is_open())
+    local _, key = panel.shown()
+    assert.are.equal("t1", key)
+    assert.are.equal(home, vim.api.nvim_get_current_win())
+  end)
+
+  it("approves a visual selection of proposed comments at once", function()
+    on("NIT: pi says")
+    press("Vj")
+    press("a")
+    for _, i in ipairs({ 3, 4 }) do
+      assert.are.equal("local", doc().threads[i].comments[1].source)
+    end
+    -- Approved comments are mine, not proposed any more: redrawn as such.
+    assert.is_nil(line_of("Proposed ("))
+  end)
+
+  it("resolves, and redraws with the new state", function()
+    on("why?")
+    press("x")
+    assert.are.equal("resolved", doc().threads[2].status)
+    -- Still unread, so it stays first, tagged.
+    assert.is_not_nil(line_of("[resolved, unsent] @al: why?"))
+    press("R")
+    assert.is_not_nil(line_of("Not published (1)"))
+  end)
+
+  it("discards every proposed comment with D", function()
+    press("D")
+    assert.are.equal(3, #doc().threads)
+  end)
+
+  it("is the review of its notes, also as the current buffer for the API", function()
+    assert.are.equal(5, #review.items())
+  end)
+end)

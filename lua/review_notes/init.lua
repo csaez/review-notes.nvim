@@ -18,6 +18,7 @@ local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local sync = require("review_notes.sync")
 local panel = require("review_notes.panel")
+local home = require("review_notes.home")
 
 local M = {}
 
@@ -436,6 +437,9 @@ function M.status()
   return table.concat(parts, " ")
 end
 
+--- The home of the current review: every thread, the review-wide actions.
+function M.home() home.open() end
+
 -- Sync --------------------------------------------------------------------
 
 --- Bring the remote threads in. Never sends anything.
@@ -447,8 +451,9 @@ M.publish = sync.publish
 -- Setup -------------------------------------------------------------------
 
 local commands = {
-  pull = M.pull,
-  publish = M.publish,
+  home = M.home,
+  pull = function() M.pull() end,
+  publish = function() M.publish() end,
   list = M.list,
   open = M.open,
   approve = function(args) M.approve(args == "all") end,
@@ -507,7 +512,7 @@ function M.setup(opts)
   })
   vim.api.nvim_create_user_command("Review", function(a)
     local name, rest = a.args:match("^(%S*)%s*(.*)$")
-    if name == "" then name = "toggle" end
+    if name == "" then name = "home" end
     local fn = commands[name]
     if not fn then return notify("unknown subcommand: " .. name, vim.log.levels.ERROR) end
     fn(rest)

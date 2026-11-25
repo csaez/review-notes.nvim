@@ -28,6 +28,7 @@ local function pull(ctx, opts)
     return false
   end
   local report
+  M.pulled_at[ctx.path] = os.time()
   review.edit(ctx, function(doc, side)
     report = merge.pull(doc, side, r.json)
   end)
@@ -45,9 +46,19 @@ local function pull(ctx, opts)
   return true
 end
 
+--- When each review (by notes path) was last pulled, this session.
+---@type table<string, integer>
+M.pulled_at = {}
+
+local function git_review(ctx)
+  if ctx and ctx.kind == "git" then return ctx end
+  return review.remote_context()
+end
+
 --- Bring the remote threads in. Never sends anything.
-function M.pull()
-  local ctx = review.remote_context()
+---@param ctx review_notes.Context? default: the current buffer's review
+function M.pull(ctx)
+  ctx = git_review(ctx)
   if not ctx then return end
   vim.cmd("silent! wall")
   backend.async(function() pull(ctx) end)
@@ -96,8 +107,9 @@ end
 --- Pull, show what would be sent, and send it after a confirm. Everything is
 --- queued as drafts and published together (one notification), only the
 --- drafts created here.
-function M.publish()
-  local ctx = review.remote_context()
+---@param ctx review_notes.Context? default: the current buffer's review
+function M.publish(ctx)
+  ctx = git_review(ctx)
   if not ctx then return end
   vim.cmd("silent! wall")
   backend.async(function()

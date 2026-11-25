@@ -107,7 +107,10 @@ local function show_code(item, focus)
     return
   end
   local win = code_win()
-  if not win then return notify("no window for the code") end
+  if not win then
+    if focus then notify("no window for the code") end
+    return
+  end
   vim.api.nvim_win_call(win, function()
     if vim.api.nvim_buf_get_name(0) ~= item.file then vim.cmd("edit " .. vim.fn.fnameescape(item.file)) end
     local last = vim.api.nvim_buf_line_count(0)
@@ -265,6 +268,7 @@ end
 ---@class review_notes.PanelOpts
 ---@field code_win integer? the window for the code (default: the current one, unless it is the panel)
 ---@field follow boolean? show the code (default true)
+---@field focus boolean? and move the cursor to it
 ---@field reorder boolean? take the `]t` order from the review again
 
 --- Show the thread *key* of *ctx* in the panel, opening it when needed.
@@ -276,7 +280,8 @@ function M.show(ctx, key, opts)
   local cur = vim.api.nvim_get_current_win()
   if opts.code_win then
     state.code_win = opts.code_win
-  elseif cur ~= panel_win() and vim.api.nvim_win_get_config(cur).relative == "" then
+  elseif cur ~= panel_win() and vim.api.nvim_win_get_config(cur).relative == ""
+    and vim.bo[vim.api.nvim_win_get_buf(cur)].buftype == "" then
     state.code_win = cur
   end
   if state.ctx ~= ctx or opts.reorder then state.order = {} end
@@ -286,7 +291,7 @@ function M.show(ctx, key, opts)
   render()
   local item, entry = current()
   if not (item and entry) then return end
-  if opts.follow ~= false then show_code(item, false) end
+  if opts.follow ~= false then show_code(item, opts.focus == true) end
   if merge.is_unread(entry.thread, entry.state) then actions.read(ctx, key) end
 end
 
