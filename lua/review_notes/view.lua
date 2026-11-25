@@ -30,6 +30,7 @@ function M.set_highlights()
   hl("ReviewMine", "Special")
   hl("ReviewText", "Comment")
   hl("ReviewHeader", "Folded")
+  hl("ReviewRange", "Visual")
 end
 
 -- Layout ----------------------------------------------------------------

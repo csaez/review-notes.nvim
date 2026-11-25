@@ -170,7 +170,7 @@ function M.save_comment(ctx, target, text)
   end)
 end
 
-local function open_composer(ctx, target, title, thread)
+local function open_composer(ctx, target, title, thread, win)
   local existing
   for _, c in ipairs(thread and thread.comments or {}) do
     if c.source == "local" then existing = c.body end
@@ -178,6 +178,7 @@ local function open_composer(ctx, target, title, thread)
   compose.open({
     title = title,
     text = existing,
+    win = win,
     on_save = function(text) M.save_comment(ctx, target, text) end,
   })
 end
@@ -185,8 +186,9 @@ end
 --- Reply to a thread, or edit my reply not published yet.
 ---@param ctx review_notes.Context
 ---@param entry review_notes.Entry
-function M.reply(ctx, entry)
-  open_composer(ctx, { key = entry.key }, "reply to " .. store.anchor_string(entry.thread.anchor), entry.thread)
+---@param win integer? open the composer inside this window (the panel)
+function M.reply(ctx, entry, win)
+  open_composer(ctx, { key = entry.key }, "reply to " .. store.anchor_string(entry.thread.anchor), entry.thread, win)
 end
 
 --- Start a thread on *anchor* (`{}` is the whole change).

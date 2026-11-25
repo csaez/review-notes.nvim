@@ -68,7 +68,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
     { "<leader>rp", function() require("review_notes").publish() end, desc = "Review: publish" },
     { "<leader>rx", function() require("review_notes").toggle_resolved() end, desc = "Review: resolve / reopen" },
     { "<leader>ra", function() require("review_notes").approve() end, desc = "Review: approve proposed" },
-    { "<CR>", function() require("review_notes").toggle_expand() end, desc = "Review: expand thread" },
+    { "<leader>rt", function() require("review_notes").thread() end, desc = "Review: thread in the panel" },
     { "]r", function() require("review_notes").jump_unread(1) end, desc = "Review: next unread" },
     { "[r", function() require("review_notes").jump_unread(-1) end, desc = "Review: previous unread" },
   },
@@ -102,6 +102,27 @@ labelled `change` or `file <name>`, so they are never confused with a thread
 on line 1 (those are drawn below it). `toggle_expand(true)` opens the header
 from anywhere in the buffer, `reply_general()` answers in it.
 
+### The thread panel
+
+`thread()` shows the thread at the cursor in a panel on the right (a menu
+when there are several; on line 1 the change threads count too). Pickers
+open it with `open_item(item)`, and `jump_unread(dir)` goes through it. It
+is one window, reused, and it follows: showing a thread marks it seen and
+shows its code (range highlighted) in the window you came from. The panel
+redraws when the notes change, so a pull or pi writing shows up live.
+
+| Key        | In the panel                                          |
+| ---------- | ----------------------------------------------------- |
+| `r`        | reply, or edit my reply not published yet             |
+| `x`        | resolve / reopen; accepts a resolve by someone else   |
+| `a`        | approve the proposed comment                          |
+| `d`        | discard my unpublished text (asks for a new thread, which goes entirely) |
+| `]t` `[t`  | next / previous thread (the picker's order)           |
+| `]u` `[u`  | next / previous unread                                |
+| `o`        | go to the code                                        |
+| `q`        | close                                                 |
+| `g?`       | help                                                  |
+
 ### Writing
 
 `add()` opens a small float: on a thread it is your reply, elsewhere a new
@@ -131,6 +152,7 @@ whole change, `add_general(true)` on the current file.
 | `:Review approve [all]` | approve proposed comments                            |
 | `:Review discard [proposed]` | delete the unpublished part of the thread, or every proposed comment |
 | `:Review expand`   | expand or collapse every thread                           |
+| `:Review thread`   | the thread at the cursor in the panel                     |
 | `:Review open`     | open the notes file                                       |
 
 ## How syncing works
@@ -265,8 +287,8 @@ returns every thread of the buffer's review, urgent first, as one kind of row
 preview) and `text` (searchable). A thread on a directory (a submodule's
 pointer change) points at its heading in the notes file instead.
 
-- `open_item(item)` goes to the code (for a change thread, the top of the
-  buffer, where the header is), expands the thread and marks it seen.
+- `open_item(item)` shows the thread in the panel and its code in the
+  current window, and marks it seen.
 - `goto_item(item)` only goes there.
 - `item_action(item, "resolve" | "read" | "approve" | "discard")` acts without leaving
   the picker. Refresh its items afterwards.

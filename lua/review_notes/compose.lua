@@ -8,6 +8,7 @@ local M = {}
 ---@field text string? initial text
 ---@field on_save fun(text: string) called on every save with the trimmed text
 ---@field on_close fun()? called when the float closes
+---@field win integer? open at the bottom of this window, at its width (default: under the cursor)
 
 --- Open the composer. `:w` or `<C-s>` saves and closes, `q` closes (`:q!`
 --- when there are unsaved changes).
@@ -24,10 +25,15 @@ function M.open(opts)
 
   local width = math.min(80, math.max(40, vim.o.columns - 10))
   local height = math.min(math.max(#lines + 2, 6), math.max(6, math.floor(vim.o.lines / 2)))
-  local win = vim.api.nvim_open_win(buf, true, {
-    relative = "cursor",
-    row = 1,
-    col = 0,
+  local place = { relative = "cursor", row = 1, col = 0 }
+  local host = opts.win
+  if host and vim.api.nvim_win_is_valid(host) then
+    -- Inside the window, borders included.
+    width = math.max(20, vim.api.nvim_win_get_width(host) - 2)
+    height = math.min(height, math.max(3, vim.api.nvim_win_get_height(host) - 4))
+    place = { relative = "win", win = host, row = vim.api.nvim_win_get_height(host) - height - 2, col = 0 }
+  end
+  local win = vim.api.nvim_open_win(buf, true, vim.tbl_extend("force", place, {
     width = width,
     height = height,
     style = "minimal",
@@ -35,7 +41,7 @@ function M.open(opts)
     title = " " .. opts.title .. " ",
     footer = " <C-s> save  q close ",
     footer_pos = "right",
-  })
+  }))
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   vim.bo[buf].textwidth = 0

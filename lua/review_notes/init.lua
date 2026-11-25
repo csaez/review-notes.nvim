@@ -17,6 +17,7 @@ local config = require("review_notes.config")
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local sync = require("review_notes.sync")
+local panel = require("review_notes.panel")
 
 local M = {}
 
@@ -353,12 +354,16 @@ function M.goto_item(item)
   vim.api.nvim_win_set_cursor(0, { math.min(item.line, last), 0 })
 end
 
---- Go to *item* and show its conversation.
+--- Show *item* in the thread panel, and its code in the current window.
 ---@param item review_notes.Item
 function M.open_item(item)
-  M.goto_item(item)
-  set_expanded(item.ctx, item.key, true)
-  actions.read(item.ctx, item.key)
+  panel.show(item.ctx, item.key)
+end
+
+--- Show the thread at the cursor in the thread panel (a menu when there are
+--- several; on line 1 the change threads count too).
+function M.thread()
+  with_target("Show", function(ctx, entry) panel.show(ctx, entry.key, { follow = false }) end)
 end
 
 ---@param item review_notes.Item
@@ -449,6 +454,7 @@ local commands = {
   approve = function(args) M.approve(args == "all") end,
   discard = function(args) if args == "proposed" then M.discard_proposed() else M.discard() end end,
   toggle = M.toggle,
+  thread = M.thread,
   expand = function() M.toggle_expand_all() end,
 }
 
