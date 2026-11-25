@@ -24,7 +24,7 @@ describe("home", function()
     vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
     vim.fn.writefile({ "a", "b", "c", "d" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
-    review.setup({ backend = {}, watch = false, mr = false })
+    review.setup({ backend = {}, watch = false, mr = false, auto_pull = false })
     notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
     vim.fn.writefile({

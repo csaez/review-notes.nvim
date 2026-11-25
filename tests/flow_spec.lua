@@ -37,6 +37,7 @@ describe("pull and publish", function()
     vim.fn.writefile({ "[]" }, threads_file)
     vim.env.FAKE_LOG, vim.env.FAKE_THREADS = log, threads_file
     review.setup({
+      auto_pull = false,
       backend = {
         threads = cmd("threads"),
         add = cmd("add", "{path}:{line}", "-"),
@@ -101,6 +102,41 @@ describe("pull and publish", function()
     assert.are.same(before, read(notes_path))
   end)
 
+  it("pulls automatically at most once per auto_pull seconds, and not with auto_pull off", function()
+    local sync = require("review_notes.sync")
+    local ctx = require("review_notes.review").context()
+    write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
+    review.config.auto_pull = false
+    sync.auto_pull(ctx)
+    vim.wait(300)
+    assert.are.same({}, calls())
+    review.config.auto_pull = 60
+    sync.auto_pull(ctx)
+    sync.auto_pull(ctx)
+    wait_for(function() return #read(notes_path) > 0 end, "auto pull")
+    sync.auto_pull(ctx)
+    vim.wait(300)
+    assert.are.same({ "threads" }, calls())
+  end)
+
+  it("an automatic pull that fails warns once and leaves the notes alone", function()
+    local sync = require("review_notes.sync")
+    local ctx = require("review_notes.review").context()
+    review.config.backend.threads = cmd("fail")
+    review.config.auto_pull = 0
+    local notify, warnings = vim.notify, 0
+    vim.notify = function(_, level) if level == vim.log.levels.WARN then warnings = warnings + 1 end end
+    sync.auto_pull(ctx)
+    wait_for(function() return #calls() == 1 end, "first attempt")
+    vim.wait(100)
+    sync.auto_pull(ctx)
+    wait_for(function() return #calls() == 2 end, "second attempt")
+    vim.wait(100)
+    vim.notify = notify
+    assert.are.equal(1, warnings)
+    assert.are.same({}, read(notes_path))
+  end)
+
   it("publish sends new threads, replies and resolves, once, then pulls", function()
     write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
     review.pull()
@@ -162,7 +198,7 @@ describe("discard", function()
     vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
     vim.fn.writefile({ "a", "b" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
-    review.setup({ backend = {} })
+    review.setup({ backend = {}, auto_pull = false })
     notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
     vim.fn.writefile({

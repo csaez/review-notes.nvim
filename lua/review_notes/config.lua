@@ -5,6 +5,8 @@ local M = {}
 ---@class review_notes.Config
 ---@field signs boolean sign column marks on the anchors
 ---@field watch boolean redraw when a notes file changes on disk
+---@field auto_pull integer|false pull in the background on focus and on
+---  entering the home, when the last pull is older than this many seconds
 ---@field backend table<string, string[]> Command lines, run in the repo root.
 ---  `{path}`, `{line}`, `{thread}` and `{ids}` are substituted; text goes on stdin.
 ---    threads    prints [{id, path, line, resolved, comments = [{id, author, body}]}]
@@ -43,6 +45,7 @@ local M = {}
 M.values = {
   signs = true,
   watch = true,
+  auto_pull = 60,
   backend = {
     threads = { "git-lab", "comment", "list", "--json" },
     add = { "git-lab", "comment", "add", "--draft", "--json", "{path}:{line}", "-" },

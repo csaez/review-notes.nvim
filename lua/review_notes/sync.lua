@@ -19,20 +19,46 @@ local function choose(prompt, choices)
   return coroutine.yield()
 end
 
+--- When each review (by notes path) was last pulled, this session.
+---@type table<string, integer>
+M.pulled_at = {}
+
+---@class review_notes.PullState
+---@field tried integer? last attempt, failed or not
+---@field failing boolean? the last attempt failed
+---@field running boolean? an automatic pull is under way
+
+---@type table<string, review_notes.PullState> by notes path
+local pulls = {}
+
+local function pull_state(ctx)
+  pulls[ctx.path] = pulls[ctx.path] or {}
+  return pulls[ctx.path]
+end
+
 --- Bring the remote threads in, inside an async function. Never sends.
+--- *mode* `quiet` reports nothing; `auto` reports only when something came
+--- in, and a failure only when the previous attempt worked.
+---@param mode "quiet"|"auto"|nil
 ---@return boolean ok
-local function pull(ctx, opts)
+local function pull(ctx, mode)
+  local s = pull_state(ctx)
+  s.tried = os.time()
   local r = backend.run(config.values.backend, "threads", { root = ctx.root })
   if not r.ok or type(r.json) ~= "table" then
-    notify("pull failed: " .. (r.ok and "the backend printed no thread list" or backend.message(r)), vim.log.levels.ERROR)
+    if not (mode == "auto" and s.failing) then
+      notify((mode == "auto" and "automatic pull failed: " or "pull failed: ")
+        .. (r.ok and "the backend printed no thread list" or backend.message(r)),
+        mode == "auto" and vim.log.levels.WARN or vim.log.levels.ERROR)
+    end
+    s.failing = true
     return false
   end
-  local report
+  s.failing = false
   M.pulled_at[ctx.path] = os.time()
-  review.edit(ctx, function(doc, side)
-    report = merge.pull(doc, side, r.json)
-  end)
-  if not (opts and opts.quiet) then
+  local report = review.edit(ctx, function(doc, side) return merge.pull(doc, side, r.json) end)
+  local news = report.added + report.changed + #report.orphaned > 0
+  if mode ~= "quiet" and (news or mode ~= "auto") then
     local unread = 0
     for _, item in ipairs(review.items(ctx)) do
       if item.state == "unread" then unread = unread + 1 end
@@ -46,9 +72,27 @@ local function pull(ctx, opts)
   return true
 end
 
---- When each review (by notes path) was last pulled, this session.
----@type table<string, integer>
-M.pulled_at = {}
+--- Pull *ctx* in the background when the last attempt is older than
+--- `auto_pull` seconds (failed ones count, so an offline remote is not hit
+--- on every focus). Quiet unless threads came in or it starts failing.
+--- Skipped while the notes file has unsaved edits in a buffer: the write
+--- would conflict with them.
+---@param ctx review_notes.Context?
+function M.auto_pull(ctx)
+  local every = config.values.auto_pull
+  if not every or not ctx or ctx.kind ~= "git" or not config.values.backend.threads then return end
+  local s = pull_state(ctx)
+  if s.running or os.time() - (s.tried or 0) < every then return end
+  local buf = vim.fn.bufnr(ctx.path)
+  if buf ~= -1 and vim.bo[buf].modified then return end
+  s.running = true
+  backend.async(function()
+    -- Clear `running` even when the pull throws, or auto pull stops for good.
+    local ok, err = pcall(pull, ctx, "auto")
+    s.running = false
+    if not ok then error(err, 0) end
+  end)
+end
 
 local function git_review(ctx)
   if ctx and ctx.kind == "git" then return ctx end
@@ -114,7 +158,7 @@ function M.publish(ctx)
   vim.cmd("silent! wall")
   backend.async(function()
     local cmds = config.values.backend
-    if not pull(ctx, { quiet = true }) then return end
+    if not pull(ctx, "quiet") then return end
     local doc, side = review.read(ctx)
     local plan = merge.plan(doc, side)
     if #plan.items == 0 then
@@ -172,10 +216,7 @@ function M.publish(ctx)
       if not r.ok then
         fail("submit", r)
         if cmds.discard then backend.run(cmds, "discard", { root = ctx.root }) end
-        for item in pairs(queued) do done[item] = nil end
-        for item in pairs(done) do
-          if item.kind ~= "resolve" and item.kind ~= "unresolve" then done[item] = nil end
-        end
+        done = {}
       end
     end
     -- After submit: publishing a queued reply reopens a resolved thread.
@@ -193,7 +234,7 @@ function M.publish(ctx)
       end
     end)
     -- What was sent comes back as remote comments, mine, so not unread.
-    pull(ctx, { quiet = true })
+    pull(ctx, "quiet")
     if #failures > 0 then
       notify("published with problems:\n" .. table.concat(failures, "\n"), vim.log.levels.ERROR)
     else

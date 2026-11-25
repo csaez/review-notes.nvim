@@ -403,6 +403,12 @@ logic is testable in plain Lua, and a fake backend script covers the rest.
 - The thread panel is a right split, reused, not a float.
 - The home includes the MR (header line, `m` actions) through optional
   hooks; checking out another MR stays a global key.
-- `pull` is explicit (`p` in the home). Automatic pull can come later.
+- `pull` is explicit (`p` in the home, `:Review pull`) and also automatic:
+  on `FocusGained` (the review of the current buffer) and on entering the
+  home, when the last pull (or failed attempt) is older than `auto_pull`
+  seconds (default 60; false turns it off). Pull is safe, so running it
+  unasked is fine; it reports only new or changed threads, warns once when
+  it starts failing, and waits while the notes file has unsaved edits in a
+  buffer. Publish stays explicit.
 - A thread whose line was deleted stays on the nearest line and is marked
   `moved`.

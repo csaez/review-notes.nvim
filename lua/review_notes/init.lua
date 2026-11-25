@@ -37,13 +37,12 @@ local notify = review.notify
 -- Code buffers --------------------------------------------------------------
 
 local function tally(entries)
-  local n = { unread = 0, proposed = 0, unsent = 0, open = 0 }
+  local n = { unread = 0, proposed = 0, unsent = 0 }
   for _, e in ipairs(entries) do
     local f = merge.flags(e.thread, e.state)
-    if f.unread then n.unread = n.unread + 1 end
-    if f.proposed then n.proposed = n.proposed + 1 end
-    if f.unsent then n.unsent = n.unsent + 1 end
-    if not f.resolved then n.open = n.open + 1 end
+    for k in pairs(n) do
+      if f[k] then n[k] = n[k] + 1 end
+    end
   end
   return n
 end
@@ -123,21 +122,12 @@ function M.thread()
   }, function(a) if a then show(a) end end)
 end
 
---- Visual range as 1-based lines, leaving visual mode.
-local function visual_range()
-  local mode = vim.fn.mode()
-  if mode ~= "v" and mode ~= "V" and mode ~= "\22" then return nil end
-  local a, b = vim.fn.line("v"), vim.fn.line(".")
-  vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
-  return math.min(a, b), math.max(a, b)
-end
-
 --- Start a thread on the line, or the selected lines, even where one is
 --- already (replies are `r` in the panel). Writes into the notes only;
 --- `publish` sends it.
 function M.new()
   local buf = vim.api.nvim_get_current_buf()
-  local first, last = visual_range()
+  local first, last = review.visual_lines()
   local ctx = current_review(buf)
   if not ctx then return end
   if not review.is_reviewed(buf) then return notify("not a file under review") end
@@ -156,6 +146,23 @@ function M.new_change()
   if ctx then actions.new_thread(ctx, {}) end
 end
 
+--- The first element of the sorted *list* after the cursor (*dir* 1) or the
+--- last one before it (-1), wrapping around. *cmp* places an element before
+--- (-1), at (0) or after (1) the cursor.
+---@generic T
+---@param list T[]
+---@param dir integer
+---@param cmp fun(x: T): integer
+---@return T
+local function step(list, dir, cmp)
+  local first, last, inc = 1, #list, 1
+  if dir < 0 then first, last, inc = #list, 1, -1 end
+  for i = first, last, inc do
+    if cmp(list[i]) == dir then return list[i] end
+  end
+  return list[first]
+end
+
 --- Next or previous thread: the unread ones across the review while there
 --- are any, else the threads of this buffer. The panel follows when open.
 ---@param dir integer 1 or -1
@@ -163,51 +170,24 @@ function M.next(dir)
   local buf = vim.api.nvim_get_current_buf()
   local ctx = current_review(buf)
   if not ctx then return end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
   local unread = vim.tbl_filter(function(i) return i.state == "unread" end, review.items(ctx))
   if #unread > 0 then
     table.sort(unread, function(a, b) return a.order < b.order end)
     local rel = review.is_reviewed(buf) and review.note_path(vim.api.nvim_buf_get_name(buf), ctx.root) or ""
-    local row = vim.api.nvim_win_get_cursor(0)[1]
-    local function pos(i) return i.kind == "change" and "" or review.note_path(i.file, ctx.root), i.kind == "line" and i.line or 0 end
-    local function after(i)
-      local p, l = pos(i)
-      if p ~= rel then return p > rel end
-      return l > row
-    end
-    local function before(i)
-      local p, l = pos(i)
-      if p ~= rel then return p < rel end
-      return l < row
-    end
-    local target
-    if dir > 0 then
-      for _, i in ipairs(unread) do
-        if after(i) then target = i break end
-      end
-      target = target or unread[1]
-    else
-      for k = #unread, 1, -1 do
-        if before(unread[k]) then target = unread[k] break end
-      end
-      target = target or unread[#unread]
-    end
+    local target = step(unread, dir, function(i)
+      local path = i.entry.thread.anchor.path or ""
+      if path ~= rel then return path < rel and -1 or 1 end
+      local line = i.kind == "line" and i.line or 0
+      return line < row and -1 or line > row and 1 or 0
+    end)
     return panel.show(ctx, target.key, { focus = true })
   end
   local list = signs.anchored(buf)
   if #list == 0 then return notify("nothing unread, no threads in this buffer") end
-  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-  local target
-  if dir > 0 then
-    for _, a in ipairs(list) do
-      if a.row > row then target = a break end
-    end
-    target = target or list[1]
-  else
-    for i = #list, 1, -1 do
-      if list[i].row < row then target = list[i] break end
-    end
-    target = target or list[#list]
-  end
+  local target = step(list, dir, function(a)
+    return a.row + 1 < row and -1 or a.row + 1 > row and 1 or 0
+  end)
   vim.api.nvim_win_set_cursor(0, { target.row + 1, 0 })
   if panel.is_open() then panel.show(ctx, target.entry.key, { follow = false }) end
 end
@@ -239,14 +219,9 @@ function M.open_item(item)
   panel.show(item.ctx, item.key)
 end
 
---- Go to the code of *item* in the current window; a thread with no code
---- (the change, a directory) opens in the panel instead.
----@param item review_notes.Item
-function M.goto_item(item)
-  if item.kind == "change" or item.file == item.ctx.path then return M.open_item(item) end
-  vim.cmd("edit " .. vim.fn.fnameescape(item.file))
-  vim.api.nvim_win_set_cursor(0, { math.min(item.line, vim.api.nvim_buf_line_count(0)), 0 })
-end
+--- Go to the code of *item* in the current window, the thread in the panel;
+--- a thread with no code (the change, a directory) only opens the panel.
+M.goto_item = panel.go_to
 
 ---@param item review_notes.Item
 ---@param action "resolve"|"read"|"approve"|"discard"
@@ -298,6 +273,10 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter", "FocusGained" }, {
     group = group,
     callback = function(ev) redraw_buffer(ev.buf) end,
+  })
+  vim.api.nvim_create_autocmd("FocusGained", {
+    group = group,
+    callback = function(ev) sync.auto_pull(contexts[ev.buf] or review.context(ev.buf)) end,
   })
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,

@@ -10,15 +10,11 @@ local panel = require("review_notes.panel")
 
 local M = {}
 
-local function entry(item) return review.entry(item.ctx, item.key) end
-
 --- Run *fn* on the item, then refresh the list (the item moved section).
 local function act(fn)
   return function(picker, item)
     if not item then return end
-    local e = entry(item)
-    if not e then return review.notify("that thread is gone", vim.log.levels.WARN) end
-    fn(item, e)
+    fn(item.ctx, item.key)
     picker:find()
   end
 end
@@ -60,28 +56,21 @@ M.source = {
   actions = {
     review_code = function(picker, item)
       picker:close()
-      if item then require("review_notes").goto_item(item) end
+      if item then panel.go_to(item) end
     end,
     review_reply = function(picker, item)
-      if not item then return end
-      local e = entry(item)
       picker:close()
-      if e then actions.reply(item.ctx, e) end
+      if item then actions.reply(item.ctx, item.entry) end
     end,
-    review_resolve = act(function(item) actions.resolve(item.ctx, item.key) end),
-    review_read = act(function(item) actions.read(item.ctx, item.key) end),
-    review_approve = act(function(item) actions.approve(item.ctx, item.key) end),
+    review_resolve = act(actions.resolve),
+    review_read = act(actions.read),
+    review_approve = function(picker, item)
+      if not item then return end
+      actions.approve_items({ item })
+      picker:find()
+    end,
     review_discard = function(picker, item)
-      local e = item and entry(item)
-      if not (item and e) then return end
-      if not actions.can_discard(e) then return review.notify("nothing unpublished here") end
-      local function go()
-        actions.discard(item.ctx, item.key)
-        picker:find()
-      end
-      -- As in the panel: only deleting a whole new thread asks.
-      if e.thread.id then return go() end
-      actions.confirm_discard(e, go)
+      if item then actions.discard_items({ item }, function() picker:find() end) end
     end,
   },
   win = {

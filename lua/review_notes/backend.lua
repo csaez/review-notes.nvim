@@ -71,12 +71,7 @@ end
 --- stays responsive.
 ---@param fn fun()
 function M.async(fn)
-  local co = coroutine.create(fn)
-  local function step(...)
-    local ok, err = coroutine.resume(co, ...)
-    if not ok then vim.notify("review: " .. tostring(err), vim.log.levels.ERROR) end
-  end
-  step()
+  M.resume(coroutine.create(fn))
 end
 
 --- First line of an error, for notifications.

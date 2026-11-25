@@ -27,7 +27,7 @@ describe("thread panel", function()
     vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
     vim.fn.writefile({ "a", "b", "c", "d" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
-    review.setup({ backend = {}, watch = false })
+    review.setup({ backend = {}, watch = false, auto_pull = false })
     notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
     vim.fn.writefile({
@@ -64,6 +64,17 @@ describe("thread panel", function()
     assert.are.equal(2, vim.api.nvim_win_get_cursor(code)[1])
     item = vim.tbl_filter(function(i) return i.anchor == "a.c:2-3" end, review.items())[1]
     assert.are_not.equal("unread", item.state)
+  end)
+
+  it("goto_item goes to the code in the current window and shows the thread", function()
+    vim.cmd("enew")
+    local win = vim.api.nvim_get_current_win()
+    local item = vim.tbl_filter(function(i) return i.anchor == "a.c:2-3" end, review.items())[1]
+    review.goto_item(item)
+    assert.are.equal(win, vim.api.nvim_get_current_win())
+    assert.are.equal(item.file, vim.api.nvim_buf_get_name(0))
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(win)[1])
+    assert.truthy(panel_lines():find("# a.c:2-3", 1, true))
   end)
 
   it("resolves, approves and walks the threads with its keys", function()

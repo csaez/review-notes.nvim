@@ -3,7 +3,6 @@
 -- urgency (each a fold). The thread keys of the panel work on the thread
 -- under the cursor (or a visual selection), and the review-wide keys live
 -- here: pull, publish, approve or discard all proposed, the MR actions.
-local merge = require("review_notes.merge")
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local config = require("review_notes.config")
@@ -198,43 +197,26 @@ end
 ---@param buf integer
 ---@return review_notes.Item[]
 local function selected(buf)
-  local h = homes[buf]
-  local mode = vim.fn.mode()
-  local first, last
-  if mode == "v" or mode == "V" or mode == "\22" then
-    first, last = vim.fn.line("v"), vim.fn.line(".")
-    if first > last then first, last = last, first end
-    vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
-  else
+  local first, last = review.visual_lines()
+  if not first then
     first = vim.api.nvim_win_get_cursor(0)[1]
     last = first
   end
   local out = {}
   for l = first, last do
-    if h.rows[l] then table.insert(out, h.rows[l]) end
+    if homes[buf].rows[l] then table.insert(out, homes[buf].rows[l]) end
   end
+  if #out == 0 then notify("no thread on this line") end
   return out
 end
 
-local function one(buf)
-  local list = selected(buf)
-  if #list == 0 then notify("no thread on this line") end
-  return list[1]
-end
+local function one(buf) return selected(buf)[1] end
 
---- Run *fn* on each selected thread that *ok* accepts.
-local function each(buf, what, ok, fn)
-  local list = selected(buf)
-  if #list == 0 then return notify("no thread on this line") end
-  local n = 0
-  for _, item in ipairs(list) do
-    local entry = review.entry(item.ctx, item.key)
-    if entry and (not ok or ok(entry)) then
-      fn(item, entry)
-      n = n + 1
-    end
+--- Run *fn* on each selected thread.
+local function each(buf, fn)
+  return function()
+    for _, item in ipairs(selected(buf)) do fn(item.ctx, item.key) end
   end
-  if n == 0 then notify("nothing to " .. what .. " here") end
 end
 
 -- MR ------------------------------------------------------------------------------
@@ -318,37 +300,16 @@ local function set_keys(buf)
   end, "show in the panel")
   map("o", function()
     local item = one(buf)
-    if not item then return end
-    if item.kind == "change" or item.file == item.ctx.path then
-      return panel.show(item.ctx, item.key, { reorder = true })
-    end
-    -- The home's window becomes the code; the panel shows the thread.
-    vim.cmd("edit " .. vim.fn.fnameescape(item.file))
-    panel.show(item.ctx, item.key, { reorder = true, code_win = vim.api.nvim_get_current_win() })
+    if item then panel.go_to(item) end
   end, "go to the code")
   map("r", function()
     local item = one(buf)
-    local entry = item and review.entry(item.ctx, item.key)
-    if entry then actions.reply(item.ctx, entry) end
+    if item then actions.reply(item.ctx, item.entry) end
   end, "reply")
-  map("x", function() each(buf, "resolve", nil, function(i) actions.resolve(i.ctx, i.key) end) end, "resolve / reopen", nx)
-  map("a", function()
-    each(buf, "approve", function(e) return merge.has_unpublished(e.thread) end, function(i) actions.approve(i.ctx, i.key) end)
-  end, "approve proposed", nx)
-  map("d", function()
-    local list = vim.tbl_filter(function(i)
-      local e = review.entry(i.ctx, i.key)
-      return e and actions.can_discard(e)
-    end, selected(buf))
-    if #list == 0 then return notify("nothing unpublished here") end
-    local new = #vim.tbl_filter(function(i) return not review.entry(i.ctx, i.key).thread.id end, list)
-    local function go() for _, i in ipairs(list) do actions.discard(i.ctx, i.key) end end
-    if new == 0 then return go() end
-    vim.ui.select({ "Discard", "Keep" }, {
-      prompt = ("Discard %d thread(s); %d never published will be deleted?"):format(#list, new),
-    }, function(choice) if choice == "Discard" then go() end end)
-  end, "discard unpublished", nx)
-  map("R", function() each(buf, "mark read", nil, function(i) actions.read(i.ctx, i.key) end) end, "mark read", nx)
+  map("x", each(buf, actions.resolve), "resolve / reopen", nx)
+  map("a", function() actions.approve_items(selected(buf)) end, "approve proposed", nx)
+  map("d", function() actions.discard_items(selected(buf)) end, "discard unpublished", nx)
+  map("R", each(buf, actions.read), "mark read", nx)
 
   map("p", function() sync.pull(h.ctx) end, "pull")
   map("P", function() sync.publish(h.ctx) end, "publish")
@@ -401,6 +362,8 @@ function M.open(ctx)
       homes[buf] = nil
       review.bind(buf, nil)
     end })
+    -- Also on opening: the home is where I go to see what is new.
+    vim.api.nvim_create_autocmd("BufEnter", { buffer = buf, callback = function() sync.auto_pull(ctx) end })
     review.watch(ctx.path)
     load_mr(buf)
   end
@@ -432,13 +395,6 @@ end
 --- The text of a closed section: its header line.
 function M.foldtext()
   return vim.fn.getline(vim.v.foldstart) .. "  ..."
-end
-
---- The review whose home is in *buf*, if any.
----@param buf integer
----@return review_notes.Context?
-function M.context_of(buf)
-  return homes[buf] and homes[buf].ctx
 end
 
 review.on_change(redraw_all)

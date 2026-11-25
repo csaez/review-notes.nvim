@@ -30,7 +30,9 @@ Review  feature/timeouts  !123 -> main                 | # src/http.cpp:120-124
 - **One kind of thread.** Comments on a line, a range, a file or the whole
   change are all threads, and all work the same way.
 - **Pull is safe.** It never sends anything and never touches your text, so it
-  is fine to run in the middle of a peer or an agent adding comments.
+  is fine to run in the middle of a peer or an agent adding comments. It also
+  runs on its own, quietly, when Neovim gets focus or you enter the home and
+  the last pull is over a minute old (`auto_pull`).
 - **Publish is one deliberate step.** It shows what it will send, asks, and
   sends new threads, replies and resolves in one go (one notification, only
   what it created).
@@ -82,7 +84,8 @@ composer) have their own keys, listed by `g?` in each.
 ## Quick start
 
 1. Check out the branch under review and open a file.
-2. `<leader>rr` opens the home; `p` pulls the threads of the merge request.
+2. `<leader>rr` opens the home, which pulls the threads of the merge request
+   (`p` pulls again any time).
 3. `<CR>` on a thread shows it in the panel, with its code in the window you
    came from. `r` replies, `x` resolves, `]t` moves to the next one.
 4. In the code, `<leader>rn` on a line (or a visual selection) starts a new
@@ -235,6 +238,10 @@ The full grammar is at the top of
 require("review_notes").setup({
   signs = true,   -- gutter marks on the anchors
   watch = true,   -- redraw when a notes file changes (an agent, a pull)
+  -- Pull in the background on focus and on entering the home, when the last
+  -- pull is older than this many seconds; quiet unless threads came in.
+  -- false: only `p` / `:Review pull`.
+  auto_pull = 60,
   -- Command lines run in the repository root. {path}, {line}, {thread} and
   -- {ids} are filled in. Text goes on stdin; structured output comes back as
   -- JSON on stdout.
@@ -322,7 +329,8 @@ file.
 
 - `open_item(item)` shows the thread in the panel and its code in the
   current window, and marks it seen.
-- `goto_item(item)` only goes to the code.
+- `goto_item(item)` goes to the code in the current window and shows the
+  thread in the panel (`o` in the home, `<a-o>` in the picker).
 - `item_action(item, "resolve" | "read" | "approve" | "discard")` acts without
   leaving the picker. Refresh its items afterwards.
 

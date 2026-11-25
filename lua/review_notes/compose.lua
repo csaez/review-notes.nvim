@@ -7,7 +7,6 @@ local M = {}
 ---@field title string
 ---@field text string? initial text
 ---@field on_save fun(text: string) called on every save with the trimmed text
----@field on_close fun()? called when the float closes
 ---@field win integer? open at the bottom of this window, at its width (default: under the cursor)
 
 --- Open the composer. `:w` or `<C-s>` saves and closes, `q` closes (`:q!`
@@ -53,11 +52,6 @@ function M.open(opts)
     opts.on_save(text)
   end
   vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = save })
-  vim.api.nvim_create_autocmd("BufWipeout", {
-    buffer = buf,
-    once = true,
-    callback = function() if opts.on_close then vim.schedule(opts.on_close) end end,
-  })
   local function map(mode, lhs, fn) vim.keymap.set(mode, lhs, fn, { buffer = buf, nowait = true }) end
   map({ "n", "i" }, "<C-s>", save)
   map("n", "q", function()

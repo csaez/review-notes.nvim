@@ -3,7 +3,6 @@
 -- code window next to it; the thread keys (reply, resolve, approve, discard,
 -- next / previous) act on the thread shown. It redraws on every change of
 -- the notes, so a pull or pi writing shows up while it is open.
-local merge = require("review_notes.merge")
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 
@@ -45,12 +44,12 @@ local function panel_win()
   end
 end
 
---- The item and the entry of the thread shown, read now.
----@return review_notes.Item?, review_notes.Entry?
+--- The thread shown, read now.
+---@return review_notes.Item?
 local function current()
   if not (state.ctx and state.key) then return nil end
   for _, item in ipairs(review.items(state.ctx)) do
-    if item.key == state.key then return item, review.entry(state.ctx, state.key) end
+    if item.key == state.key then return item end
   end
 end
 
@@ -102,7 +101,7 @@ end
 ---@param item review_notes.Item
 ---@param focus boolean move the cursor there
 local function show_code(item, focus)
-  if item.kind == "change" or item.file == item.ctx.path then
+  if not item.has_code then
     if focus then notify("this thread has no code") end
     return
   end
@@ -127,18 +126,16 @@ end
 local function render()
   local win = panel_win()
   if not win then return end
-  local item, entry = current()
+  local item = current()
   local lines, status_hl = {}, nil
-  if not (item and entry) then
+  if not item then
     lines = { "This thread is gone: deleted, or published under a new id." }
   else
+    local entry = item.entry
     local t = entry.thread
     local n = #t.comments
     local bits = { item.state }
     vim.list_extend(bits, item.tags)
-    if t.status == "resolved" and item.state ~= "resolved" and not vim.tbl_contains(item.tags, "resolved") then
-      table.insert(bits, "resolved")
-    end
     local by = entry.state and entry.state.resolved_by
     if by and t.status == "resolved" then table.insert(bits, "by @" .. by) end
     table.insert(bits, n == 1 and "1 comment" or (n .. " comments"))
@@ -160,10 +157,10 @@ end
 
 -- Acting ------------------------------------------------------------------------
 
-local function with_entry(fn)
-  local item, entry = current()
-  if not (item and entry and state.ctx) then return notify("no thread in the panel") end
-  fn(state.ctx, entry, item)
+local function with_item(fn)
+  local item = current()
+  if not item then return notify("no thread in the panel") end
+  fn(item)
 end
 
 --- Move to the next or previous thread, or unread thread.
@@ -200,29 +197,15 @@ local function map(lhs, fn, desc)
 end
 
 local function set_keys()
-  map("r", function()
-    with_entry(function(ctx, entry) actions.reply(ctx, entry, panel_win()) end)
-  end, "reply")
-  map("x", function() with_entry(function(ctx, entry) actions.resolve(ctx, entry.key) end) end, "resolve / reopen")
-  map("a", function()
-    with_entry(function(ctx, entry)
-      if not merge.has_unpublished(entry.thread) then return notify("nothing proposed here") end
-      actions.approve(ctx, entry.key)
-    end)
-  end, "approve proposed")
-  map("d", function()
-    with_entry(function(ctx, entry)
-      if not actions.can_discard(entry) then return notify("nothing unpublished here") end
-      -- Only a whole new thread is worth a question; the rest is local text.
-      if entry.thread.id then return actions.discard(ctx, entry.key) end
-      actions.confirm_discard(entry, function() actions.discard(ctx, entry.key) end)
-    end)
-  end, "discard unpublished")
+  map("r", function() with_item(function(i) actions.reply(i.ctx, i.entry, panel_win()) end) end, "reply")
+  map("x", function() with_item(function(i) actions.resolve(i.ctx, i.key) end) end, "resolve / reopen")
+  map("a", function() with_item(function(i) actions.approve_items({ i }) end) end, "approve proposed")
+  map("d", function() with_item(function(i) actions.discard_items({ i }) end) end, "discard unpublished")
   map("]t", function() step(1) end, "next thread")
   map("[t", function() step(-1) end, "previous thread")
   map("]u", function() step(1, true) end, "next unread")
   map("[u", function() step(-1, true) end, "previous unread")
-  map("o", function() with_entry(function(_, _, item) show_code(item, true) end) end, "go to the code")
+  map("o", function() with_item(function(i) show_code(i, true) end) end, "go to the code")
   map("q", M.close, "close")
   map("g?", function() notify(table.concat(HELP, "\n")) end, "help")
 end
@@ -289,10 +272,23 @@ function M.show(ctx, key, opts)
   ensure_buf()
   ensure_win()
   render()
-  local item, entry = current()
-  if not (item and entry) then return end
+  local item = current()
+  if not item then return end
   if opts.follow ~= false then show_code(item, opts.focus == true) end
-  if merge.is_unread(entry.thread, entry.state) then actions.read(ctx, key) end
+  if item.state == "unread" then actions.read(ctx, key) end
+end
+
+--- Go to the code of *item* in the current window and show the thread in
+--- the panel. A thread with no code (the change, a directory) only opens in
+--- the panel.
+---@param item review_notes.Item
+function M.go_to(item)
+  local win
+  if item.has_code then
+    vim.cmd("edit " .. vim.fn.fnameescape(item.file))
+    win = vim.api.nvim_get_current_win()
+  end
+  M.show(item.ctx, item.key, { reorder = true, code_win = win })
 end
 
 function M.close()

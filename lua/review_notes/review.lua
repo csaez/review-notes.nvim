@@ -140,6 +140,17 @@ function M.full_path(path, root)
   return vim.startswith(path, "/") and path or (root .. "/" .. path)
 end
 
+--- The visual selection as 1-based lines, leaving visual mode; nil outside
+--- visual mode.
+---@return integer?, integer?
+function M.visual_lines()
+  local mode = vim.fn.mode()
+  if mode ~= "v" and mode ~= "V" and mode ~= "\22" then return nil end
+  local a, b = vim.fn.line("v"), vim.fn.line(".")
+  vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
+  return math.min(a, b), math.max(a, b)
+end
+
 -- Reading ---------------------------------------------------------------
 
 --- A key for *thread*: its remote id, or its place among new threads.
@@ -189,17 +200,6 @@ function M.entries_of(doc, side)
     out[i] = { key = keys[i], thread = t, state = t.id and side.threads[t.id] or nil }
   end
   return out
-end
-
---- The entry of *key*, read now.
----@param ctx review_notes.Context
----@param key string
----@return review_notes.Entry?
-function M.entry(ctx, key)
-  local doc, side = M.read(ctx)
-  for _, e in ipairs(M.entries_of(doc, side)) do
-    if e.key == key then return e end
-  end
 end
 
 -- Changing ----------------------------------------------------------------
@@ -256,7 +256,9 @@ M.style = {
 ---@class review_notes.Item
 ---@field key string
 ---@field ctx review_notes.Context
+---@field entry review_notes.Entry the thread, as read with the item
 ---@field kind "change"|"file"|"line"
+---@field has_code boolean false for the change and directories: `file` is the notes
 ---@field anchor string
 ---@field file string where the thread is: the code, or the notes file for the change
 ---@field line integer
@@ -272,12 +274,17 @@ M.style = {
 ---@field rank integer
 ---@field order integer place in the notes file
 
+---@param c review_notes.Comment
+---@param mine string the label of my unpublished comments
+local function who(c, mine)
+  if c.source == "remote" then return "@" .. (c.author or "unknown") end
+  return c.source == "proposed" and "me (proposed)" or mine
+end
+
 local function thread_markdown(t)
   local out = {}
   for _, c in ipairs(t.comments) do
-    local who = c.source == "remote" and ("@" .. (c.author or "unknown"))
-      or (c.source == "proposed" and "me (proposed)" or "me (not published)")
-    vim.list_extend(out, { "### " .. who, "" })
+    vim.list_extend(out, { "### " .. who(c, "me (not published)"), "" })
     vim.list_extend(out, vim.split(c.body, "\n", { plain = true }))
     table.insert(out, "")
   end
@@ -290,10 +297,11 @@ end
 ---@param ctx review_notes.Context
 ---@return review_notes.Item[]
 function M.items(ctx)
-  local doc, side = M.read(ctx)
+  local lines = store.read_lines(ctx.path)
+  local doc, side = store.parse(lines), store.read_sidecar(store.sidecar_path(ctx.path))
   local heading = {}
   local n = 0
-  for i, l in ipairs(store.read_lines(ctx.path)) do
+  for i, l in ipairs(lines) do
     if l:match("^## ") then
       n = n + 1
       heading[n] = i
@@ -311,26 +319,27 @@ function M.items(ctx)
     if f.proposed and state ~= "proposed" then table.insert(tags, "proposed") end
     if f.unsent and state ~= "unsent" then table.insert(tags, "unsent") end
     local summary = last and vim.split(last.body, "\n", { plain = true })[1] or ""
-    local who = not last and "" or last.source == "remote" and ("@" .. (last.author or "unknown"))
-      or (last.source == "proposed" and "me (proposed)" or "me")
     local file = kind == "change" and ctx.path or M.full_path(t.anchor.path, ctx.root)
     -- A submodule's pointer change is anchored on a directory: editing it
     -- would open a file explorer, show the thread in the notes instead.
-    local in_notes = kind == "change" or vim.fn.isdirectory(file) == 1
+    local has_code = kind ~= "change" and vim.fn.isdirectory(file) == 0
+    local line = has_code and math.max(1, t.anchor.line or 1) or (heading[i] or 1)
     items[i] = {
       key = e.key,
       ctx = ctx,
+      entry = e,
       kind = kind,
+      has_code = has_code,
       anchor = store.anchor_string(t.anchor),
-      file = in_notes and ctx.path or file,
-      line = in_notes and (heading[i] or 1) or math.max(1, t.anchor.line or 1),
-      end_line = (in_notes or kind ~= "line") and (heading[i] or 1) or (t.anchor.end_line or t.anchor.line),
+      file = has_code and file or ctx.path,
+      line = line,
+      end_line = has_code and kind == "line" and (t.anchor.end_line or line) or line,
       state = state,
       icon = M.style[state].icon,
       hl = M.style[state].hl,
       tags = tags,
       summary = summary,
-      who = who,
+      who = last and who(last, "me") or "",
       thread = thread_markdown(t),
       text = table.concat({ state, store.anchor_string(t.anchor), table.concat(tags, " "), summary }, " "),
       rank = rank,

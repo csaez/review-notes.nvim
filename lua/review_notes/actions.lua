@@ -1,6 +1,7 @@
 -- The verbs on threads, in one place: every UI (the code buffer keys, the
--- picker, later the home and the thread panel) calls these. A thread is
--- named by its review and key; the change is local until `publish`.
+-- picker, the home and the thread panel) calls these. A thread is named by
+-- its review and key; the change is local until `publish`. The `*_items`
+-- variants take picker / home items and tell when there is nothing to do.
 local store = require("review_notes.store")
 local merge = require("review_notes.merge")
 local review = require("review_notes.review")
@@ -71,7 +72,7 @@ end
 --- Whether *entry* has anything `discard` would remove.
 ---@param entry review_notes.Entry
 ---@return boolean
-function M.can_discard(entry)
+local function can_discard(entry)
   local f = merge.flags(entry.thread, entry.state)
   return merge.has_unpublished(entry.thread) or (f.unsent and entry.thread.id ~= nil)
 end
@@ -84,14 +85,33 @@ function M.discard(ctx, key)
   review.edit_thread(ctx, key, drop_unpublished)
 end
 
---- Ask before `discard`; *fn* runs on yes.
----@param entry review_notes.Entry
----@param fn fun()
-function M.confirm_discard(entry, fn)
-  local what = entry.thread.id and "Discard the unpublished text of this thread?"
-    or "Delete this thread (never published)?"
-  vim.ui.select({ "Discard", "Keep" }, { prompt = what }, function(choice)
-    if choice == "Discard" then fn() end
+--- Approve the proposed comments of *items*.
+---@param items review_notes.Item[]
+function M.approve_items(items)
+  if #items == 0 then return end
+  local list = vim.tbl_filter(function(i) return merge.flags(i.entry.thread, i.entry.state).proposed end, items)
+  if #list == 0 then return notify("nothing proposed here") end
+  for _, i in ipairs(list) do M.approve(i.ctx, i.key) end
+end
+
+--- Discard the unpublished part of *items*. Only deleting a thread that was
+--- never published asks first; the rest is local text. *done* runs after.
+---@param items review_notes.Item[]
+---@param done fun()?
+function M.discard_items(items, done)
+  if #items == 0 then return end
+  local list = vim.tbl_filter(function(i) return can_discard(i.entry) end, items)
+  if #list == 0 then return notify("nothing unpublished here") end
+  local new = #vim.tbl_filter(function(i) return not i.entry.thread.id end, list)
+  local function go()
+    for _, i in ipairs(list) do M.discard(i.ctx, i.key) end
+    if done then done() end
+  end
+  if new == 0 then return go() end
+  local prompt = #list == 1 and "Delete this thread (never published)?"
+    or ("Discard %d threads; %d never published will be deleted?"):format(#list, new)
+  vim.ui.select({ "Discard", "Keep" }, { prompt = prompt }, function(choice)
+    if choice == "Discard" then go() end
   end)
 end
 
