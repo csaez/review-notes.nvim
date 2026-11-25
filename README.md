@@ -115,7 +115,8 @@ whole change, `add_general(true)` on the current file.
 | `toggle_resolved()`     | resolve or reopen (sent by publish); on a thread someone else resolved it first accepts it |
 | `mark_read()`           | mark the thread as seen                                |
 | `approve(all?)`         | approve proposed comments of the thread (or all)       |
-| `discard()`             | delete unpublished text of the thread                  |
+| `discard()`             | delete the unpublished part of the thread (mine, proposed, an unsent resolve); a thread never published is removed entirely |
+| `discard_proposed()`    | delete every proposed (tool) comment, threads it started included |
 | `jump(dir)`             | next / previous thread in the buffer                   |
 | `jump_unread(dir)`      | next / previous unread thread across the review        |
 
@@ -128,6 +129,7 @@ whole change, `add_general(true)` on the current file.
 | `:Review publish`  | pull, show what would be sent, confirm, send, pull        |
 | `:Review list`     | the threads in the quickfix list                          |
 | `:Review approve [all]` | approve proposed comments                            |
+| `:Review discard [proposed]` | delete the unpublished part of the thread, or every proposed comment |
 | `:Review expand`   | expand or collapse every thread                           |
 | `:Review open`     | open the notes file                                       |
 
@@ -265,7 +267,7 @@ preview) and `text` (searchable).
 - `open_item(item)` goes to the code (for a change thread, the top of the
   buffer, where the header is), expands the thread and marks it seen.
 - `goto_item(item)` only goes there.
-- `item_action(item, "resolve" | "read" | "approve")` acts without leaving
+- `item_action(item, "resolve" | "read" | "approve" | "discard")` acts without leaving
   the picker. Refresh its items afterwards.
 
 <details>

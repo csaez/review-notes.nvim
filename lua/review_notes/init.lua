@@ -553,20 +553,68 @@ function M.approve(all)
   end)
 end
 
---- Delete my text on the thread at the cursor (local and proposed); a thread
---- not published yet goes with it.
+--- Remove everything unpublished from a thread: my text, proposed comments,
+--- and a resolve or reopen not sent yet. A thread that was never published
+--- goes entirely, as if it never existed.
+local function drop_unpublished(t, doc, side)
+  t.comments = vim.tbl_filter(function(c) return c.source == "remote" end, t.comments)
+  if not t.id then
+    doc.threads = vim.tbl_filter(function(x) return x ~= t end, doc.threads)
+  elseif side.threads[t.id] then
+    t.status = side.threads[t.id].status
+  end
+end
+
+local function confirm_discard(entry, fn)
+  local t = entry.thread
+  local what = t.id and "Discard the unpublished text of this thread?" or "Delete this thread (never published)?"
+  vim.ui.select({ "Discard", "Keep" }, { prompt = what }, function(choice)
+    if choice == "Discard" then fn() end
+  end)
+end
+
+--- Delete the unpublished part of the thread at the cursor (mine and
+--- proposed). Remote comments are never touched.
 function M.discard()
   with_target("Discard", function(ctx, entry)
-    if not merge.has_unpublished(entry.thread) then return notify("nothing unpublished here") end
-    vim.ui.select({ "Discard", "Keep" }, { prompt = "Discard unpublished text?" }, function(choice)
-      if choice ~= "Discard" then return end
-      edit_thread(ctx, entry.key, function(t, doc)
-        t.comments = vim.tbl_filter(function(c) return c.source == "remote" end, t.comments)
-        if not t.id then
-          doc.threads = vim.tbl_filter(function(x) return x ~= t end, doc.threads)
+    local f = merge.flags(entry.thread, entry.state)
+    if not merge.has_unpublished(entry.thread) and not (f.unsent and entry.thread.id) then
+      return notify("nothing unpublished here")
+    end
+    confirm_discard(entry, function() edit_thread(ctx, entry.key, drop_unpublished) end)
+  end)
+end
+
+--- Delete every proposed comment (a tool's), threads it started included.
+--- Mine and the remote's stay.
+function M.discard_proposed()
+  local ctx = current_review(vim.api.nvim_get_current_buf())
+  if not ctx then return end
+  local doc = read_review(ctx)
+  local n = 0
+  for _, t in ipairs(doc.threads) do
+    for _, c in ipairs(t.comments) do
+      if c.source == "proposed" then n = n + 1 end
+    end
+  end
+  if n == 0 then return notify("no proposed comments") end
+  vim.ui.select({ "Discard", "Keep" }, { prompt = ("Delete all %d proposed comments?"):format(n) }, function(choice)
+    if choice ~= "Discard" then return end
+    edit(ctx, function(d, side)
+      local keep = {}
+      for _, t in ipairs(d.threads) do
+        local had = merge.has_unpublished(t)
+        t.comments = vim.tbl_filter(function(c) return c.source ~= "proposed" end, t.comments)
+        if t.id then
+          if had and side.threads[t.id] and not merge.has_unpublished(t) then t.status = side.threads[t.id].status end
+          table.insert(keep, t)
+        elseif #t.comments > 0 then
+          table.insert(keep, t)
         end
-      end)
+      end
+      d.threads = keep
     end)
+    M.refresh()
   end)
 end
 
@@ -708,8 +756,12 @@ function M.open_item(item)
 end
 
 ---@param item review_notes.Item
----@param action "resolve"|"read"|"approve"
+---@param action "resolve"|"read"|"approve"|"discard"
 function M.item_action(item, action)
+  if action == "discard" then
+    -- Not through edit_thread's callback alone: the thread can be dropped.
+    return edit_thread(item.ctx, item.key, drop_unpublished)
+  end
   edit_thread(item.ctx, item.key, function(t, _, side)
     if action == "resolve" then
       if merge.resolved_unseen(t, t.id and side.threads[t.id]) then
@@ -977,6 +1029,7 @@ local commands = {
   list = M.list,
   open = M.open,
   approve = function(args) M.approve(args == "all") end,
+  discard = function(args) if args == "proposed" then M.discard_proposed() else M.discard() end end,
   toggle = M.toggle,
   expand = function() M.toggle_expand_all() end,
 }
@@ -1015,6 +1068,7 @@ function M.setup(opts)
     nargs = "*",
     complete = function(lead, line)
       if line:match("^%S+%s+approve%s") then return { "all" } end
+      if line:match("^%S+%s+discard%s") then return { "proposed" } end
       return vim.tbl_filter(function(c) return c:find(lead, 1, true) == 1 end, vim.tbl_keys(commands))
     end,
   })

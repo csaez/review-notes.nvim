@@ -153,3 +153,51 @@ describe("pull and publish", function()
     assert.are.equal("local", doc().threads[1].comments[1].source)
   end)
 end)
+
+describe("discard", function()
+  local repo, notes_path
+  before_each(function()
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+    vim.fn.writefile({ "a", "b" }, repo .. "/a.c")
+    vim.cmd("cd " .. repo)
+    review.setup({ backend = {} })
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({
+      "## a.c:1", "status: open", "", "### me (proposed)", "NIT: pi finding", "",
+      "## a.c:2 {id=t1}", "status: resolved", "", "### @bo {id=1}", "q", "", "### me (proposed)", "fixed", "",
+    }, notes_path)
+    store.write_sidecar(store.sidecar_path(notes_path), { threads = { t1 = { status = "open", seen = { ["1"] = true }, seen_status = true } } })
+    vim.cmd("edit a.c")
+    local select = vim.ui.select
+    vim.ui.select = function(items, _, cb) cb(items[1]) end
+    vim.b.restore = select
+  end)
+  after_each(function() vim.fn.delete(repo, "rf") end)
+
+  it("deletes a finding that was never published, as if it never existed", function()
+    local item = vim.tbl_filter(function(i) return i.anchor == "a.c:1" end, review.items())[1]
+    review.item_action(item, "discard")
+    local d = store.parse(store.read_lines(notes_path))
+    assert.are.equal(1, #d.threads)
+    assert.are.equal("t1", d.threads[1].id)
+  end)
+
+  it("on a remote thread removes the proposed reply and the resolve that came with it", function()
+    local item = vim.tbl_filter(function(i) return i.anchor == "a.c:2" end, review.items())[1]
+    review.item_action(item, "discard")
+    local t = store.parse(store.read_lines(notes_path)).threads[2]
+    assert.are.equal("open", t.status)
+    assert.are.equal(1, #t.comments)
+    assert.are.equal("remote", t.comments[1].source)
+  end)
+
+  it("discard proposed clears them all and keeps the remote ones", function()
+    review.discard_proposed()
+    local d = store.parse(store.read_lines(notes_path))
+    assert.are.equal(1, #d.threads)
+    assert.are.equal("open", d.threads[1].status)
+  end)
+end)
