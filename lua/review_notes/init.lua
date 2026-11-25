@@ -1,61 +1,30 @@
 -- Code review notes kept outside the code, shown inline, synced on demand.
 -- See DESIGN.md. The notes of a branch live in `.git/review/<branch>.md` (a
--- file outside git gets a sibling `<file>.review.md`); `store` reads and
--- writes them, `merge` has the pull and publish rules, `view` draws the
--- threads and `compose` is the editor float. This module is the glue:
--- context, commands, autocmds and the public API.
+-- file outside git gets a sibling `<file>.review.md`).
+--
+--   review   which review a buffer is in, reading and changing it
+--   actions  the verbs on threads, shared by every UI
+--   sync     pull and publish
+--   view     signs and virtual lines in code buffers
+--   store, merge, backend, compose: the file, the rules, the remote, the editor
+--
+-- This module is the glue: drawing code buffers, finding the thread at the
+-- cursor, commands, autocmds and the public API.
 local store = require("review_notes.store")
 local merge = require("review_notes.merge")
 local view = require("review_notes.view")
-local compose = require("review_notes.compose")
-local backend = require("review_notes.backend")
+local config = require("review_notes.config")
+local review = require("review_notes.review")
+local actions = require("review_notes.actions")
+local sync = require("review_notes.sync")
 
 local M = {}
-local uv = vim.uv or vim.loop
 
----@class review_notes.Config
----@field visible boolean show the thread text (review mode) at startup
----@field signs boolean sign column marks on the anchors
----@field watch boolean redraw when a notes file changes on disk
----@field backend table<string, string[]> Command lines, run in the repo root.
----  `{path}`, `{line}`, `{thread}` and `{ids}` are substituted; text goes on stdin.
----    threads    prints [{id, path, line, resolved, comments = [{id, author, body}]}]
----               path = null is a thread on the whole change; line 0 a whole
----               file; line (and start_line) are lines of the files on disk.
----               Optional: comments[].mine (my own comments never count as
----               unread), resolved_by, resolved_by_me
----    add        starts a thread at {path}:{line}, text on stdin
----    general    starts a thread on the whole change, text on stdin
----    reply      replies to {thread}, text on stdin
----               add, general, reply print {id} (with submit: the queued draft)
----    resolve, unresolve  change the state of {thread}
----    submit     optional: publishes what add/general/reply queued: {ids}, the
----               comma-separated ids they printed, so drafts queued elsewhere
----               stay pending; may print {published = [ids]}, also on failure
----    discard    optional: drops the queued {ids} that submit did not publish
-M.config = {
-  visible = true,
-  signs = true,
-  watch = true,
-  backend = {
-    threads = { "git-lab", "comment", "list", "--json" },
-    add = { "git-lab", "comment", "add", "--draft", "--json", "{path}:{line}", "-" },
-    general = { "git-lab", "comment", "add", "--draft", "--json", "-" },
-    reply = { "git-lab", "comment", "reply", "--draft", "--json", "{thread}", "-" },
-    resolve = { "git-lab", "comment", "resolve", "{thread}" },
-    unresolve = { "git-lab", "comment", "unresolve", "{thread}" },
-    submit = { "git-lab", "review", "submit", "--only", "{ids}", "--json" },
-    discard = { "git-lab", "review", "discard", "--only", "{ids}" },
-  },
-}
+--- The options (see `review_notes.Config`); `setup` merges into them.
+M.config = config.values
 
---- Icons and highlight groups per state (see `view.style`).
-M.style = view.style
-
----@class review_notes.Context
----@field kind "git"|"file"
----@field root string repo root, or the file's directory
----@field path string the notes file
+--- Icons and highlight groups per state.
+M.style = review.style
 
 local visible = true
 local contexts = {} ---@type table<integer, review_notes.Context>
@@ -63,138 +32,7 @@ local last_ctx ---@type review_notes.Context?
 local expanded = {} ---@type table<string, table<string, boolean>> by notes path, then thread key
 local counts = {} ---@type table<string, table<string, integer>> by notes path
 
-local function notify(msg, level)
-  vim.notify(msg, level or vim.log.levels.INFO, { title = "review" })
-end
-
--- Context ---------------------------------------------------------------
-
-local function git(args, cwd)
-  local out = vim.system(vim.list_extend({ "git" }, args), { cwd = cwd, text = true }):wait()
-  if out.code ~= 0 then return nil end
-  return vim.trim(out.stdout)
-end
-
-local function git_context(root)
-  local gitdir = git({ "rev-parse", "--path-format=absolute", "--git-path", "review" }, root)
-  if not gitdir then return nil end
-  local branch = git({ "branch", "--show-current" }, root)
-  -- Mid-rebase HEAD is detached; keep showing the rebased branch's notes.
-  for _, dir in ipairs({ "rebase-merge", "rebase-apply" }) do
-    if branch and branch ~= "" then break end
-    local head = git({ "rev-parse", "--path-format=absolute", "--git-path", dir .. "/head-name" }, root)
-    local lines = head and vim.fn.filereadable(head) == 1 and vim.fn.readfile(head) or {}
-    branch = lines[1] and lines[1]:gsub("^refs/heads/", "") or nil
-  end
-  if not branch or branch == "" then branch = "HEAD" end
-  return { kind = "git", root = root, path = gitdir .. "/" .. branch .. ".md" }
-end
-
--- Memoised per root in *memo*: one refresh walks every buffer.
-local function repo_context(dir, memo)
-  local root = vim.fn.isdirectory(dir) == 1 and vim.fs.root(dir, ".git") or nil
-  if not root then return nil end
-  if memo[root] == nil then memo[root] = git_context(root) or false end
-  return memo[root] or nil
-end
-
---- The review a buffer belongs to: a file in a git worktree is in its
---- branch's review, any other file has its own, next to it.
----@param buf integer? defaults to the current buffer
----@param memo table?
----@return review_notes.Context?
-local function context(buf, memo)
-  buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
-  memo = memo or {}
-  local name = vim.api.nvim_buf_get_name(buf)
-  if name == "" or vim.bo[buf].buftype ~= "" or name:find("/.git/", 1, true) then
-    return repo_context(vim.fn.getcwd(), memo)
-  end
-  local dir = vim.fs.dirname(name)
-  if name:match("%.review%.md$") then return { kind = "file", root = dir, path = name } end
-  return repo_context(dir, memo) or { kind = "file", root = dir, path = name .. ".review.md" }
-end
-
---- The review that remote commands act on: the buffer's when it is a branch
---- review, else the cwd's repo.
-local function remote_context()
-  local ctx = context()
-  if ctx and ctx.kind == "git" then return ctx end
-  ctx = repo_context(vim.fn.getcwd(), {})
-  if not ctx then notify("local review (no git repository): nothing to sync") end
-  return ctx
-end
-
-local function is_reviewed(buf)
-  local name = vim.api.nvim_buf_get_name(buf)
-  return vim.api.nvim_buf_is_loaded(buf)
-    and vim.bo[buf].buftype == ""
-    and name ~= ""
-    and not name:match("%.review%.md$")
-    and not name:find("/.git/", 1, true)
-end
-
-local function note_path(name, root)
-  if name:sub(1, #root + 1) == root .. "/" then return name:sub(#root + 2) end
-  return name
-end
-
-local function full_path(path, root)
-  return vim.startswith(path, "/") and path or (root .. "/" .. path)
-end
-
--- Reading ---------------------------------------------------------------
-
---- A key per thread that stays the same across reads: the remote id, or the
---- anchor and the place among threads not published yet.
----@param doc review_notes.Doc
----@return string[]
-local function keys_of(doc)
-  local count, keys = {}, {}
-  for i, t in ipairs(doc.threads) do
-    local anchor = store.anchor_string(t.anchor)
-    local n = 0
-    if not t.id then
-      n = (count[anchor] or 0) + 1
-      count[anchor] = n
-    end
-    keys[i] = view.key(t, n)
-  end
-  return keys
-end
-
----@param ctx review_notes.Context
----@return review_notes.Doc, review_notes.Sidecar
-local function read_review(ctx)
-  return store.parse(store.read_lines(ctx.path)), store.read_sidecar(store.sidecar_path(ctx.path))
-end
-
----@return review_notes.Entry[]
-local function entries_of(doc, side)
-  local keys = keys_of(doc)
-  local out = {}
-  for i, t in ipairs(doc.threads) do
-    out[i] = { key = keys[i], thread = t, state = t.id and side.threads[t.id] or nil }
-  end
-  return out
-end
-
---- Change the document and the sidecar together. *fn* may run more than once
---- (the file changed under it), so it works on what it is given.
----@generic T
----@param ctx review_notes.Context
----@param fn fun(doc: review_notes.Doc, side: review_notes.Sidecar): T?
----@return T?
-local function edit(ctx, fn)
-  local side_path = store.sidecar_path(ctx.path)
-  local side
-  local result = store.update(ctx.path, function(doc)
-    side = store.read_sidecar(side_path)
-    return fn(doc, side)
-  end)
-  store.write_sidecar(side_path, side)
-  return result
-end
+local notify = review.notify
 
 -- Drawing ---------------------------------------------------------------
 
@@ -210,26 +48,24 @@ local function tally(entries)
   return n
 end
 
-local watch
-
 ---@param buf integer
 ---@param memo table?
 local function redraw_buffer(buf, memo)
-  if not is_reviewed(buf) then return end
-  local ctx = context(buf, memo)
+  if not review.is_reviewed(buf) then return end
+  local ctx = review.context(buf, memo)
   if not ctx then return end
   contexts[buf], last_ctx = ctx, ctx
-  local doc, side = read_review(ctx)
-  local entries = entries_of(doc, side)
+  local doc, side = review.read(ctx)
+  local entries = review.entries_of(doc, side)
   counts[ctx.path] = tally(entries)
-  local height = view.render(buf, entries, note_path(vim.api.nvim_buf_get_name(buf), ctx.root), visible, {
+  view.render(buf, entries, review.note_path(vim.api.nvim_buf_get_name(buf), ctx.root), visible, {
     expanded = expanded[ctx.path] or {},
-    signs = M.config.signs,
+    signs = config.values.signs,
     -- Unsaved edits: the file's lines are stale, keep where the threads are.
     buf_rows = vim.bo[buf].modified and view.live_rows(buf) or nil,
   })
-  view.show_header(buf, height)
-  watch(ctx.path)
+  view.show_header(buf)
+  review.watch(ctx.path)
 end
 
 --- Redraw every shown file.
@@ -240,40 +76,20 @@ function M.refresh()
   end
 end
 
-local watchers = {} ---@type table<string, boolean>
-local debounce
-
---- Watch the directory, not the file: writes are renames, which a watch on
---- the file itself would lose.
-function watch(path)
-  if not M.config.watch then return end
-  local dir = vim.fs.dirname(path)
-  if watchers[dir] or vim.fn.isdirectory(dir) == 0 then return end
-  local handle = uv.new_fs_event()
-  if not handle then return end
-  watchers[dir] = true
-  debounce = debounce or uv.new_timer()
-  handle:start(dir, {}, function(err, name)
-    if err or (name and name:find(".tmp.", 1, true)) then return end
-    debounce:stop()
-    debounce:start(60, 0, vim.schedule_wrap(M.refresh))
-  end)
-end
-
 -- Anchors follow edits through extmarks; saving the file writes the new
 -- lines back to the notes.
 local function sync_anchors(buf)
   local anchored = view.anchored(buf)
   local ctx = contexts[buf]
   if not ctx or #anchored == 0 then return end
-  local rel = note_path(vim.api.nvim_buf_get_name(buf), ctx.root)
+  local rel = review.note_path(vim.api.nvim_buf_get_name(buf), ctx.root)
   local live = {}
   for _, a in ipairs(anchored) do
     if not a.header then live[a.entry.key] = a end
   end
   if vim.tbl_isempty(live) then return end
   pcall(store.update, ctx.path, function(doc)
-    local keys = keys_of(doc)
+    local keys = review.keys_of(doc)
     for i, t in ipairs(doc.threads) do
       local a = live[keys[i]]
       if a and t.anchor.path == rel and t.anchor.line then
@@ -319,74 +135,23 @@ local function choose_thread(list, prompt, cb)
   }, function(choice) if choice then cb(choice) end end)
 end
 
--- Editing threads -----------------------------------------------------------
-
----@param ctx review_notes.Context
----@param key string
----@param fn fun(thread: review_notes.Thread, doc: review_notes.Doc, side: review_notes.Sidecar)
-local function edit_thread(ctx, key, fn)
-  local found = edit(ctx, function(doc, side)
-    for i, k in ipairs(keys_of(doc)) do
-      if k == key then
-        fn(doc.threads[i], doc, side)
-        return true
-      end
-    end
-  end)
-  if not found then notify("that thread is gone", vim.log.levels.WARN) end
-  M.refresh()
+--- Run *fn* on the thread at the cursor (a menu when there are several).
+---@param prompt string
+---@param fn fun(ctx: review_notes.Context, entry: review_notes.Entry)
+local function with_target(prompt, fn)
+  local buf = vim.api.nvim_get_current_buf()
+  local ctx = contexts[buf]
+  if not ctx then return notify("no review in this buffer") end
+  choose_thread(threads_here(buf), prompt, function(a) fn(ctx, a.entry) end)
 end
 
---- Save my comment of a thread (the one not published yet); an empty text
---- removes it, and a new thread with nothing left.
----@param ctx review_notes.Context
----@param target { key: string? , anchor: review_notes.Anchor? }
----@param text string
-local function save_comment(ctx, target, text)
-  edit(ctx, function(doc)
-    local thread
-    if target.key then
-      for i, k in ipairs(keys_of(doc)) do
-        if k == target.key then thread = doc.threads[i] end
-      end
-    end
-    if not thread then
-      if text == "" or not target.anchor then return end
-      thread = { anchor = target.anchor, status = "open", comments = {} }
-      table.insert(doc.threads, thread)
-    end
-    local mine
-    for _, c in ipairs(thread.comments) do
-      if c.source == "local" then mine = c end
-    end
-    if text == "" then
-      if mine then
-        thread.comments = vim.tbl_filter(function(c) return c ~= mine end, thread.comments)
-      end
-      if not thread.id and #thread.comments == 0 then
-        doc.threads = vim.tbl_filter(function(t) return t ~= thread end, doc.threads)
-      end
-    elseif mine then
-      mine.body = text
-    else
-      table.insert(thread.comments, { source = "local", body = text })
-    end
-    merge.sort(doc.threads)
-  end)
-  M.refresh()
+local function current_review(buf)
+  local ctx = contexts[buf] or review.context(buf)
+  if not ctx then notify("not in a reviewable file") end
+  return ctx
 end
 
-local function open_composer(ctx, target, title, thread)
-  local existing
-  for _, c in ipairs(thread and thread.comments or {}) do
-    if c.source == "local" then existing = c.body end
-  end
-  compose.open({
-    title = title,
-    text = existing,
-    on_save = function(text) save_comment(ctx, target, text) end,
-  })
-end
+-- Writing -------------------------------------------------------------------
 
 --- Visual range as 1-based lines, leaving visual mode.
 local function visual_range()
@@ -395,12 +160,6 @@ local function visual_range()
   local a, b = vim.fn.line("v"), vim.fn.line(".")
   vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
   return math.min(a, b), math.max(a, b)
-end
-
-local function current_review(buf)
-  local ctx = contexts[buf] or context(buf)
-  if not ctx then notify("not in a reviewable file") end
-  return ctx
 end
 
 --- Reply to the thread at the cursor, or start one on the line (or the
@@ -413,19 +172,16 @@ function M.add()
   if not first then
     local here = threads_here(buf)
     if #here > 0 then
-      return choose_thread(here, "Reply to", function(a)
-        open_composer(ctx, { key = a.entry.key }, "reply to " .. store.anchor_string(a.entry.thread.anchor), a.entry.thread)
-      end)
+      return choose_thread(here, "Reply to", function(a) actions.reply(ctx, a.entry) end)
     end
     first = vim.api.nvim_win_get_cursor(0)[1]
     last = first
   end
-  local anchor = {
-    path = note_path(vim.api.nvim_buf_get_name(buf), ctx.root),
+  actions.new_thread(ctx, {
+    path = review.note_path(vim.api.nvim_buf_get_name(buf), ctx.root),
     line = first,
     end_line = last > first and last or nil,
-  }
-  open_composer(ctx, { anchor = anchor }, "new thread on " .. store.anchor_string(anchor))
+  })
 end
 
 --- Start a thread on the whole change, or on the current file.
@@ -434,9 +190,7 @@ function M.add_general(file)
   local buf = vim.api.nvim_get_current_buf()
   local ctx = current_review(buf)
   if not ctx then return end
-  local anchor = {}
-  if file then anchor = { path = note_path(vim.api.nvim_buf_get_name(buf), ctx.root) } end
-  open_composer(ctx, { anchor = anchor }, "new thread on " .. (file and anchor.path or "the change"))
+  actions.new_thread(ctx, file and { path = review.note_path(vim.api.nvim_buf_get_name(buf), ctx.root) } or {})
 end
 
 --- Reply to a thread of the header (the change or the file).
@@ -444,25 +198,14 @@ function M.reply_general()
   local buf = vim.api.nvim_get_current_buf()
   local ctx = current_review(buf)
   if not ctx then return end
-  choose_thread(threads_here(buf, true), "Reply to", function(a)
-    open_composer(ctx, { key = a.entry.key }, "reply to " .. store.anchor_string(a.entry.thread.anchor), a.entry.thread)
-  end)
+  choose_thread(threads_here(buf, true), "Reply to", function(a) actions.reply(ctx, a.entry) end)
 end
 
-local function with_target(prompt, fn)
-  local buf = vim.api.nvim_get_current_buf()
-  local ctx = contexts[buf]
-  if not ctx then return notify("no review in this buffer") end
-  choose_thread(threads_here(buf), prompt, function(a) fn(ctx, a.entry) end)
-end
+-- Showing -------------------------------------------------------------------
 
 local function set_expanded(ctx, key, value)
   expanded[ctx.path] = expanded[ctx.path] or {}
   expanded[ctx.path][key] = value or nil
-end
-
-local function mark_seen(ctx, key)
-  edit_thread(ctx, key, function(t, _, side) merge.mark_seen(t, side) end)
 end
 
 --- Expand or collapse the thread at the cursor (or those of the header).
@@ -477,8 +220,11 @@ function M.toggle_expand(header)
   local function toggle(a)
     local open = not (expanded[ctx.path] or {})[a.entry.key]
     set_expanded(ctx, a.entry.key, open)
-    if open and merge.is_unread(a.entry.thread, a.entry.state) then mark_seen(ctx, a.entry.key) end
-    M.refresh()
+    if open and merge.is_unread(a.entry.thread, a.entry.state) then
+      actions.read(ctx, a.entry.key)
+    else
+      M.refresh()
+    end
   end
   -- The header can hold many threads: open one at a time, it would fill the window.
   if header then return choose_thread(list, "Expand", toggle) end
@@ -490,20 +236,16 @@ function M.toggle_expand_all()
   local buf = vim.api.nvim_get_current_buf()
   local ctx = contexts[buf]
   if not ctx then return end
-  local doc, side = read_review(ctx)
-  local entries = entries_of(doc, side)
+  local doc, side = review.read(ctx)
+  local entries = review.entries_of(doc, side)
   local all = true
   for _, e in ipairs(entries) do
     if not (expanded[ctx.path] or {})[e.key] then all = false end
   end
   expanded[ctx.path] = {}
-  if not all then
-    for _, e in ipairs(entries) do expanded[ctx.path][e.key] = true end
-    edit(ctx, function(d, s)
-      for _, t in ipairs(d.threads) do merge.mark_seen(t, s) end
-    end)
-  end
-  M.refresh()
+  if all then return M.refresh() end
+  for _, e in ipairs(entries) do expanded[ctx.path][e.key] = true end
+  actions.read_all(ctx)
 end
 
 --- Toggle review mode: threads as text under the code, or just the signs.
@@ -513,23 +255,17 @@ function M.toggle()
   notify("review mode " .. (visible and "on" or "off"))
 end
 
+-- Acting on the thread at the cursor ----------------------------------------
+
 --- Resolve or reopen the thread at the cursor. Resolving something someone
 --- else resolved only accepts it. Sent by `publish`.
 function M.toggle_resolved()
-  with_target("Resolve", function(ctx, entry)
-    edit_thread(ctx, entry.key, function(t, _, side)
-      if merge.resolved_unseen(t, t.id and side.threads[t.id]) then
-        merge.mark_seen(t, side)
-      else
-        t.status = t.status == "resolved" and "open" or "resolved"
-      end
-    end)
-  end)
+  with_target("Resolve", function(ctx, entry) actions.resolve(ctx, entry.key) end)
 end
 
 --- Mark the thread at the cursor as seen.
 function M.mark_read()
-  with_target("Mark read", function(ctx, entry) mark_seen(ctx, entry.key) M.refresh() end)
+  with_target("Mark read", function(ctx, entry) actions.read(ctx, entry.key) end)
 end
 
 --- Approve what a tool proposed on the thread at the cursor, so `publish`
@@ -537,51 +273,19 @@ end
 ---@param all boolean?
 function M.approve(all)
   if all then
-    local buf = vim.api.nvim_get_current_buf()
-    local ctx = current_review(buf)
+    local ctx = current_review(vim.api.nvim_get_current_buf())
     if not ctx then return end
-    local n = edit(ctx, function(doc)
-      local total = 0
-      for _, t in ipairs(doc.threads) do total = total + merge.approve(t) end
-      return total
-    end)
-    M.refresh()
-    return notify(("approved %d proposed comments"):format(n or 0))
+    return notify(("approved %d proposed comments"):format(actions.approve_all(ctx)))
   end
-  with_target("Approve", function(ctx, entry)
-    edit_thread(ctx, entry.key, function(t) merge.approve(t) end)
-  end)
-end
-
---- Remove everything unpublished from a thread: my text, proposed comments,
---- and a resolve or reopen not sent yet. A thread that was never published
---- goes entirely, as if it never existed.
-local function drop_unpublished(t, doc, side)
-  t.comments = vim.tbl_filter(function(c) return c.source == "remote" end, t.comments)
-  if not t.id then
-    doc.threads = vim.tbl_filter(function(x) return x ~= t end, doc.threads)
-  elseif side.threads[t.id] then
-    t.status = side.threads[t.id].status
-  end
-end
-
-local function confirm_discard(entry, fn)
-  local t = entry.thread
-  local what = t.id and "Discard the unpublished text of this thread?" or "Delete this thread (never published)?"
-  vim.ui.select({ "Discard", "Keep" }, { prompt = what }, function(choice)
-    if choice == "Discard" then fn() end
-  end)
+  with_target("Approve", function(ctx, entry) actions.approve(ctx, entry.key) end)
 end
 
 --- Delete the unpublished part of the thread at the cursor (mine and
 --- proposed). Remote comments are never touched.
 function M.discard()
   with_target("Discard", function(ctx, entry)
-    local f = merge.flags(entry.thread, entry.state)
-    if not merge.has_unpublished(entry.thread) and not (f.unsent and entry.thread.id) then
-      return notify("nothing unpublished here")
-    end
-    confirm_discard(entry, function() edit_thread(ctx, entry.key, drop_unpublished) end)
+    if not actions.can_discard(entry) then return notify("nothing unpublished here") end
+    actions.confirm_discard(entry, function() actions.discard(ctx, entry.key) end)
   end)
 end
 
@@ -589,33 +293,7 @@ end
 --- Mine and the remote's stay.
 function M.discard_proposed()
   local ctx = current_review(vim.api.nvim_get_current_buf())
-  if not ctx then return end
-  local doc = read_review(ctx)
-  local n = 0
-  for _, t in ipairs(doc.threads) do
-    for _, c in ipairs(t.comments) do
-      if c.source == "proposed" then n = n + 1 end
-    end
-  end
-  if n == 0 then return notify("no proposed comments") end
-  vim.ui.select({ "Discard", "Keep" }, { prompt = ("Delete all %d proposed comments?"):format(n) }, function(choice)
-    if choice ~= "Discard" then return end
-    edit(ctx, function(d, side)
-      local keep = {}
-      for _, t in ipairs(d.threads) do
-        local had = merge.has_unpublished(t)
-        t.comments = vim.tbl_filter(function(c) return c.source ~= "proposed" end, t.comments)
-        if t.id then
-          if had and side.threads[t.id] and not merge.has_unpublished(t) then t.status = side.threads[t.id].status end
-          table.insert(keep, t)
-        elseif #t.comments > 0 then
-          table.insert(keep, t)
-        end
-      end
-      d.threads = keep
-    end)
-    M.refresh()
-  end)
+  if ctx then actions.discard_proposed(ctx) end
 end
 
 --- Open the notes file in a split, to edit by hand.
@@ -649,33 +327,7 @@ function M.jump(dir)
   vim.api.nvim_win_set_cursor(0, { target.row + 1, 0 })
 end
 
----@class review_notes.Item
----@field key string
----@field ctx review_notes.Context
----@field kind "change"|"file"|"line"
----@field anchor string
----@field file string where the thread is: the code, or the notes file for the change
----@field line integer
----@field end_line integer
----@field state string "unread"|"proposed"|"unsent"|"open"|"resolved"
----@field icon string
----@field hl string
----@field tags string[]
----@field summary string
----@field thread string[] the conversation as markdown lines, for a preview
----@field text string searchable text
-
-local function thread_markdown(t)
-  local out = {}
-  for _, c in ipairs(t.comments) do
-    local who = c.source == "remote" and ("@" .. (c.author or "unknown"))
-      or (c.source == "proposed" and "me (proposed)" or "me (not published)")
-    vim.list_extend(out, { "### " .. who, "" })
-    vim.list_extend(out, vim.split(c.body, "\n", { plain = true }))
-    table.insert(out, "")
-  end
-  return out
-end
+-- Items (for pickers) -----------------------------------------------------
 
 --- Every thread of the review of *buf*, urgent first: unread, proposed, not
 --- published, open, resolved; each by position. One kind of row for all, the
@@ -683,64 +335,18 @@ end
 ---@param buf integer?
 ---@return review_notes.Item[]
 function M.items(buf)
-  local ctx = context(buf)
-  if not ctx then return {} end
-  local doc, side = read_review(ctx)
-  local heading = {}
-  local n = 0
-  for i, l in ipairs(store.read_lines(ctx.path)) do
-    if l:match("^## ") then
-      n = n + 1
-      heading[n] = i
-    end
-  end
-  local items = {}
-  for i, e in ipairs(entries_of(doc, side)) do
-    local t = e.thread
-    local f = merge.flags(t, e.state)
-    local state, rank = merge.urgency(f)
-    local kind = store.anchor_kind(t.anchor)
-    local last = t.comments[#t.comments]
-    local tags = {}
-    if f.resolved and state ~= "resolved" then table.insert(tags, "resolved") end
-    if f.proposed and state ~= "proposed" then table.insert(tags, "proposed") end
-    if f.unsent and state ~= "unsent" then table.insert(tags, "unsent") end
-    local summary = last and vim.split(last.body, "\n", { plain = true })[1] or ""
-    items[i] = {
-      key = e.key,
-      ctx = ctx,
-      kind = kind,
-      anchor = store.anchor_string(t.anchor),
-      file = kind == "change" and ctx.path or full_path(t.anchor.path, ctx.root),
-      line = kind == "change" and heading[i] or math.max(1, t.anchor.line or 1),
-      end_line = kind == "line" and (t.anchor.end_line or t.anchor.line) or (heading[i] or 1),
-      state = state,
-      icon = view.style[state].icon,
-      hl = view.style[state].hl,
-      tags = tags,
-      summary = summary,
-      thread = thread_markdown(t),
-      text = table.concat({ state, store.anchor_string(t.anchor), table.concat(tags, " "), summary }, " "),
-      rank = rank,
-      order = i,
-    }
-  end
-  table.sort(items, function(a, b)
-    if a.rank ~= b.rank then return a.rank < b.rank end
-    return a.order < b.order
-  end)
-  return items
+  local ctx = review.context(buf)
+  return ctx and review.items(ctx) or {}
 end
 
 --- Go to the code of *item*; for a change thread, the top of the current
 --- buffer (where its header is), or the notes file outside a reviewed buffer.
 ---@param item review_notes.Item
 function M.goto_item(item)
-  if item.kind == "change" then
-    if is_reviewed(vim.api.nvim_get_current_buf()) then
-      vim.api.nvim_win_set_cursor(0, { 1, 0 })
-      return
-    end
+  if item.kind == "change" and review.is_reviewed(vim.api.nvim_get_current_buf()) then
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    view.show_header(vim.api.nvim_get_current_buf(), vim.api.nvim_get_current_win())
+    return
   end
   vim.cmd("edit " .. vim.fn.fnameescape(item.file))
   local last = vim.api.nvim_buf_line_count(0)
@@ -752,29 +358,13 @@ end
 function M.open_item(item)
   M.goto_item(item)
   set_expanded(item.ctx, item.key, true)
-  mark_seen(item.ctx, item.key)
+  actions.read(item.ctx, item.key)
 end
 
 ---@param item review_notes.Item
 ---@param action "resolve"|"read"|"approve"|"discard"
 function M.item_action(item, action)
-  if action == "discard" then
-    -- Not through edit_thread's callback alone: the thread can be dropped.
-    return edit_thread(item.ctx, item.key, drop_unpublished)
-  end
-  edit_thread(item.ctx, item.key, function(t, _, side)
-    if action == "resolve" then
-      if merge.resolved_unseen(t, t.id and side.threads[t.id]) then
-        merge.mark_seen(t, side)
-      else
-        t.status = t.status == "resolved" and "open" or "resolved"
-      end
-    elseif action == "read" then
-      merge.mark_seen(t, side)
-    elseif action == "approve" then
-      merge.approve(t)
-    end
-  end)
+  actions[action](item.ctx, item.key)
 end
 
 --- Next or previous unread thread, across the files of the review.
@@ -783,13 +373,13 @@ function M.jump_unread(dir)
   local buf = vim.api.nvim_get_current_buf()
   local ctx = current_review(buf)
   if not ctx then return end
-  local unread = vim.tbl_filter(function(i) return i.state == "unread" end, M.items(buf))
+  local unread = vim.tbl_filter(function(i) return i.state == "unread" end, review.items(ctx))
   if #unread == 0 then return notify("nothing unread") end
   table.sort(unread, function(a, b) return a.order < b.order end)
-  local rel = note_path(vim.api.nvim_buf_get_name(buf), ctx.root)
+  local rel = review.note_path(vim.api.nvim_buf_get_name(buf), ctx.root)
   local row = vim.api.nvim_win_get_cursor(0)[1]
   local function ahead(item)
-    local path = item.kind == "change" and "" or note_path(item.file, ctx.root)
+    local path = item.kind == "change" and "" or review.note_path(item.file, ctx.root)
     if path ~= rel then return path > rel end
     return item.kind ~= "change" and item.line > row
   end
@@ -802,7 +392,7 @@ function M.jump_unread(dir)
   else
     for i = #unread, 1, -1 do
       if not ahead(unread[i]) and not (unread[i].kind ~= "change" and unread[i].line == row and
-        note_path(unread[i].file, ctx.root) == rel) then
+        review.note_path(unread[i].file, ctx.root) == rel) then
         target = unread[i]
         break
       end
@@ -836,190 +426,18 @@ function M.status()
   if not n then return "" end
   local parts = {}
   for _, k in ipairs({ "unread", "proposed", "unsent" }) do
-    if n[k] > 0 then table.insert(parts, view.style[k].icon .. " " .. n[k]) end
+    if n[k] > 0 then table.insert(parts, review.style[k].icon .. " " .. n[k]) end
   end
   return table.concat(parts, " ")
 end
 
 -- Sync --------------------------------------------------------------------
 
-local function choose(prompt, choices)
-  local co = assert(coroutine.running())
-  vim.ui.select(choices, { prompt = prompt }, function(choice)
-    vim.schedule(function() backend.resume(co, choice) end)
-  end)
-  return coroutine.yield()
-end
-
---- Bring the remote threads in, inside an async function. Never sends.
----@return boolean ok
-local function pull(ctx, opts)
-  local r = backend.run(M.config.backend, "threads", { root = ctx.root })
-  if not r.ok or type(r.json) ~= "table" then
-    notify("pull failed: " .. (r.ok and "the backend printed no thread list" or backend.message(r)), vim.log.levels.ERROR)
-    return false
-  end
-  local report
-  edit(ctx, function(doc, side)
-    report = merge.pull(doc, side, r.json)
-  end)
-  M.refresh()
-  if not (opts and opts.quiet) then
-    local n = counts[ctx.path] or { unread = 0 }
-    local msg = ("pulled: %d new threads, %d updated, %d unread"):format(report.added, report.changed, n.unread)
-    if #report.orphaned > 0 then
-      msg = msg .. "\ndeleted on the remote, kept because they hold your text: " .. table.concat(report.orphaned, ", ")
-    end
-    notify(msg, #report.orphaned > 0 and vim.log.levels.WARN or nil)
-  end
-  return true
-end
-
 --- Bring the remote threads in. Never sends anything.
-function M.pull()
-  local ctx = remote_context()
-  if not ctx then return end
-  vim.cmd("silent! wall")
-  backend.async(function() pull(ctx) end)
-end
+M.pull = sync.pull
 
-local function label(item)
-  local t = item.thread
-  return t.anchor.path and store.anchor_string(t.anchor) or "the change"
-end
-
-local function describe_plan(items, held)
-  local lines, n = {}, { thread = 0, reply = 0, resolve = 0, unresolve = 0 }
-  for _, item in ipairs(items) do
-    n[item.kind] = n[item.kind] + 1
-    local what = ({
-      thread = "new thread on ", reply = "reply on ", resolve = "resolve ", unresolve = "reopen ",
-    })[item.kind]
-    table.insert(lines, ("  %s%s%s"):format(what, label(item), item.stale and "  (new comments since you wrote this)" or ""))
-  end
-  if #lines > 8 then
-    local extra = #lines - 7
-    lines = vim.list_slice(lines, 1, 7)
-    table.insert(lines, ("  ... and %d more"):format(extra))
-  end
-  if #held > 0 then
-    table.insert(lines, ("  %d thread(s) with proposed comments not approved: skipped"):format(#held))
-  end
-  return table.concat(lines, "\n")
-end
-
-local function submit(ctx, ids)
-  local cmds = M.config.backend
-  local r = backend.run(cmds, "submit", { root = ctx.root, vars = { ids = table.concat(ids, ",") } })
-  local published = {}
-  local listed = type(r.json) == "table" and type(r.json.published) == "table"
-  for _, id in ipairs(listed and r.json.published or (r.ok and ids or {})) do
-    published[tostring(id)] = true
-  end
-  local left = vim.tbl_filter(function(id) return not published[id] end, ids)
-  if #left > 0 and cmds.discard then
-    backend.run(cmds, "discard", { root = ctx.root, vars = { ids = table.concat(left, ",") } })
-  end
-  return published, not r.ok and r or nil
-end
-
---- Pull, show what would be sent, and send it after a confirm. Everything is
---- queued as drafts and published together (one notification), only the
---- drafts created here.
-function M.publish()
-  local ctx = remote_context()
-  if not ctx then return end
-  vim.cmd("silent! wall")
-  backend.async(function()
-    local cmds = M.config.backend
-    if not pull(ctx, { quiet = true }) then return end
-    local doc, side = read_review(ctx)
-    local plan = merge.plan(doc, side)
-    if #plan.items == 0 then
-      return notify("nothing to publish" .. (#plan.held > 0 and (" (%d proposed, not approved)"):format(#plan.held) or ""))
-    end
-    local stale = vim.tbl_filter(function(i) return i.stale end, plan.items)
-    local choices = #stale > 0 and { "Publish all", "Skip the ones with new comments", "Cancel" } or { "Publish", "Cancel" }
-    local choice = choose("Publish?\n" .. describe_plan(plan.items, plan.held), choices)
-    if not choice or choice == "Cancel" then return end
-    local items = plan.items
-    if choice:match("^Skip") then
-      items = vim.tbl_filter(function(i) return not i.stale end, items)
-    end
-
-    local failures, done = {}, {}
-    local function fail(what, r) table.insert(failures, what .. ": " .. backend.message(r)) end
-    local by_id = cmds.submit and backend.uses(cmds, "submit", "ids")
-    local queued, ids = {}, {}
-    local function sent(item, r)
-      if not r.ok then return fail(label(item), r) end
-      local id = type(r.json) == "table" and r.json.id
-      if by_id and not id then
-        return fail(label(item), { stderr = "queued, but the backend printed no id: left pending on the remote" })
-      end
-      if by_id then
-        queued[item] = tostring(id)
-        table.insert(ids, tostring(id))
-      end
-      done[item] = true
-    end
-
-    for _, item in ipairs(items) do
-      local t, text = item.thread, item.comment and item.comment.body
-      if item.kind == "thread" then
-        local a = t.anchor
-        if a.path then
-          -- A range is anchored at its last line, as on the remote.
-          local vars = { path = a.path, line = a.end_line or a.line or 0 }
-          sent(item, backend.run(cmds, "add", { root = ctx.root, vars = vars, stdin = text }))
-        else
-          sent(item, backend.run(cmds, "general", { root = ctx.root, stdin = text }))
-        end
-      elseif item.kind == "reply" then
-        sent(item, backend.run(cmds, "reply", { root = ctx.root, vars = { thread = t.id }, stdin = text }))
-      end
-    end
-    if by_id and #ids > 0 then
-      local published, err = submit(ctx, ids)
-      if err then fail("submit", err) end
-      for item in pairs(queued) do
-        if not published[queued[item]] then done[item] = nil end
-      end
-    elseif cmds.submit and not by_id then
-      local r = backend.run(cmds, "submit", { root = ctx.root })
-      if not r.ok then
-        fail("submit", r)
-        if cmds.discard then backend.run(cmds, "discard", { root = ctx.root }) end
-        for item in pairs(queued) do done[item] = nil end
-        for item in pairs(done) do
-          if item.kind ~= "resolve" and item.kind ~= "unresolve" then done[item] = nil end
-        end
-      end
-    end
-    -- After submit: publishing a queued reply reopens a resolved thread.
-    for _, item in ipairs(items) do
-      if item.kind == "resolve" or item.kind == "unresolve" then
-        local r = backend.run(cmds, item.kind, { root = ctx.root, vars = { thread = item.thread.id } })
-        if r.ok then done[item] = true else fail(item.kind .. " " .. label(item), r) end
-      end
-    end
-
-    edit(ctx, function(d, s)
-      for _, item in ipairs(items) do
-        local found = done[item] and merge.relocate(d, item)
-        if found then merge.published(d, s, found) end
-      end
-    end)
-    -- What was sent comes back as remote comments, mine, so not unread.
-    pull(ctx, { quiet = true })
-    if #failures > 0 then
-      notify("published with problems:\n" .. table.concat(failures, "\n"), vim.log.levels.ERROR)
-    else
-      local sent_count = vim.tbl_count(done)
-      notify(("published %d item%s"):format(sent_count, sent_count == 1 and "" or "s"))
-    end
-  end)
-end
+--- Pull, show what would be sent, and send it after a confirm.
+M.publish = sync.publish
 
 -- Setup -------------------------------------------------------------------
 
@@ -1034,19 +452,42 @@ local commands = {
   expand = function() M.toggle_expand_all() end,
 }
 
+local listening = false
+
 function M.setup(opts)
-  M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  M.config = config.set(opts)
   visible = M.config.visible
   view.set_highlights()
+  if not listening then
+    listening = true
+    review.on_change(M.refresh)
+  end
   local group = vim.api.nvim_create_augroup("ReviewNotes", { clear = true })
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter", "FocusGained" }, {
     group = group,
     callback = function(ev) redraw_buffer(ev.buf) end,
   })
+  -- Keyboard motions to line 1 (gg, k) hide the header above it: scroll it
+  -- back in when the cursor arrives there, not on moves along line 1, so
+  -- <C-e> can still hide it.
+  local last_row = {} ---@type table<integer, integer> by window
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group,
+    callback = function(ev)
+      local win = vim.api.nvim_get_current_win()
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      if row == 1 and last_row[win] ~= 1 then view.show_header(ev.buf, win) end
+      last_row[win] = row
+    end,
+  })
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = group,
+    callback = function(ev) last_row[tonumber(ev.match)] = nil end,
+  })
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
     callback = function(ev)
-      if is_reviewed(ev.buf) then sync_anchors(ev.buf) redraw_buffer(ev.buf) end
+      if review.is_reviewed(ev.buf) then sync_anchors(ev.buf) redraw_buffer(ev.buf) end
     end,
   })
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {

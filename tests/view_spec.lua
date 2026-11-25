@@ -4,7 +4,7 @@ local store = require("review_notes.store")
 local function entries(lines)
   local out = {}
   for i, t in ipairs(store.parse(lines).threads) do
-    out[i] = { key = view.key(t, i), thread = t }
+    out[i] = { key = require("review_notes.review").key(t, i), thread = t }
   end
   return out
 end
@@ -42,7 +42,11 @@ describe("view", function()
     vim.api.nvim_set_current_buf(buf)
     local height = view.render(buf, entries(DOC), "a.c", true, { expanded = {}, signs = false, width = 60 })
     assert.is_true(height > 0)
-    view.show_header(buf, height)
+    view.show_header(buf)
+    assert.are.equal(height, vim.fn.winsaveview().topfill)
+    -- gg drops topfill; showing it again brings the header back.
+    vim.cmd("normal! gg")
+    view.show_header(buf, vim.api.nvim_get_current_win())
     assert.are.equal(height, vim.fn.winsaveview().topfill)
     assert.are.equal(0, view.render(buf, entries(DOC), "a.c", false, { expanded = {}, signs = false, width = 60 }))
   end)

@@ -9,33 +9,14 @@
 -- `anchors` reads where they ended up.
 local merge = require("review_notes.merge")
 local store = require("review_notes.store")
+local review = require("review_notes.review")
 
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("review_notes_view")
 
--- Nerd Font icons by state.
----@type table<string, { icon: string, hl: string }>
-M.style = {
-  unread = { icon = "\u{f0f3}", hl = "ReviewUnread" },
-  proposed = { icon = "\u{ea73}", hl = "ReviewProposed" },
-  unsent = { icon = "\u{f093}", hl = "ReviewUnsent" },
-  open = { icon = "\u{eac7}", hl = "ReviewOpen" },
-  resolved = { icon = "\u{f00c}", hl = "ReviewResolved" },
-}
-
----@class review_notes.Entry
----@field key string stable across re-reads, to remember what is expanded
----@field thread review_notes.Thread
----@field state review_notes.ThreadState?
-
---- A key for *thread*: its remote id, or its place among new threads.
----@param thread review_notes.Thread
----@param ordinal integer
----@return string
-function M.key(thread, ordinal)
-  return thread.id or ("new:" .. store.anchor_string(thread.anchor) .. "#" .. ordinal)
-end
+-- Icons and highlights by state (one table, shared with the items).
+M.style = review.style
 
 function M.set_highlights()
   local function hl(name, link) vim.api.nvim_set_hl(0, name, { default = true, link = link }) end
@@ -172,6 +153,9 @@ end
 ---@type table<integer, review_notes.Drawn[]>
 local drawn = {}
 
+---@type table<integer, integer> screen lines of the header, by buffer
+local header_height = {}
+
 ---@class review_notes.RenderOpts
 ---@field expanded table<string, boolean>
 ---@field signs boolean
@@ -192,6 +176,7 @@ end
 function M.clear(buf)
   if vim.api.nvim_buf_is_valid(buf) then vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1) end
   drawn[buf] = nil
+  header_height[buf] = nil
 end
 
 --- Draw the entries of *buf*. A header collects the change and file threads.
@@ -285,6 +270,7 @@ function M.render(buf, entries, rel, visible, opts)
       vim.list_extend(lines, M.thread_lines(d.entry, opts.expanded[d.entry.key] == true, width, true, ""))
     end
     vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { virt_lines = lines, virt_lines_above = true })
+    header_height[buf] = #lines
     return #lines
   end
   return 0
@@ -292,14 +278,17 @@ end
 
 --- Lines above line 1 are only on screen when the window is scrolled into
 --- them (topfill); a window at the top would otherwise hide the header.
+--- Motions to line 1 (`gg`, `1G`) reset topfill, so call it again after them.
 ---@param buf integer
----@param height integer
-function M.show_header(buf, height)
-  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-    vim.api.nvim_win_call(win, function()
+---@param win integer? only this window, else every window on *buf*
+function M.show_header(buf, win)
+  local height = header_height[buf] or 0
+  if height == 0 then return end
+  for _, w in ipairs(win and { win } or vim.fn.win_findbuf(buf)) do
+    vim.api.nvim_win_call(w, function()
       local v = vim.fn.winsaveview()
       -- Never more than half the window: the code must stay in view.
-      local shown = math.min(height, math.max(1, math.floor(vim.api.nvim_win_get_height(win) / 2)))
+      local shown = math.min(height, math.max(1, math.floor(vim.api.nvim_win_get_height(w) / 2)))
       if v.topline == 1 and v.topfill ~= shown then
         v.topfill = shown
         vim.fn.winrestview(v)

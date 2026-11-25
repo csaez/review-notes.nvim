@@ -262,7 +262,8 @@ returns every thread of the buffer's review, urgent first, as one kind of row
 (the change threads are rows like any other). Each item has `file`, `line`,
 `end_line`, `kind` (`change`, `file` or `line`), `anchor`, `state`, `icon`,
 `hl`, `tags`, `summary`, `thread` (the conversation as markdown lines, for a
-preview) and `text` (searchable).
+preview) and `text` (searchable). A thread on a directory (a submodule's
+pointer change) points at its heading in the notes file instead.
 
 - `open_item(item)` goes to the code (for a change thread, the top of the
   buffer, where the header is), expands the thread and marks it seen.

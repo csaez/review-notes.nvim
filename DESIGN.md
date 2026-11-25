@@ -1,7 +1,28 @@
-# review-notes.nvim v2: design
+# review-notes.nvim: design
 
-Status: implemented on this branch (the README is the user documentation). Backward compatibility is not a
-goal: the file format, commands, keymaps and backend contract may all change.
+Status: v2 (model, file format, pull and publish) is implemented. v3 (the
+UI: a review home and a thread panel instead of virtual lines) is agreed
+and not implemented yet; the sections below describe v3 where they differ.
+The README is the user documentation. Backward compatibility of commands,
+keymaps and options is not a goal; the notes file format stays.
+
+## Problems with v2 (the UI)
+
+1. Too many entry points with no home. About 15 global keys, a second set
+   in the picker (`<a-r>`, `<a-a>`, ...), and change thread variants
+   (`add_general`, `reply_general`, `toggle_expand(header)`). Nothing says
+   which key works where.
+2. Threads are virtual lines, and the cursor cannot stand on a virtual
+   line. Every action guesses its thread from the code line under the
+   cursor, and falls back to a menu when that is ambiguous (several threads
+   on a line, the header). Most of the extra keys come from this.
+3. The header of change threads sits above line 1, where Neovim only shows
+   it when the window is scrolled into it (`topfill`). Keyboard motions
+   reset that, so it needs autocmds to keep it on screen.
+4. Expand and collapse state, redraws on resize, live rows for unsaved
+   edits: complexity spent on drawing text into code buffers.
+5. In practice the picker became the hub, though it was built as a finder:
+   no review-wide actions, no summary, actions copied into user config.
 
 ## Problems with v1
 
@@ -22,13 +43,17 @@ goal: the file format, commands, keymaps and backend contract may all change.
 - **Everything is a thread.** A thread has an anchor, a status and a list of
   comments. General comments are threads with the anchor `change`; there is no
   other kind of thing.
-- **Content is right there in review mode, out of the way otherwise.** One
-  toggle.
+- **The review has a home.** One buffer shows the whole review and holds
+  the review-wide actions; one panel shows a thread and holds the thread
+  actions. Code buffers only get signs.
+- **Keys belong to a context.** The plugin sets no global keys, but its own
+  buffers (home, panel, composer) have their own, short ones. A verb has the
+  same key everywhere it applies (home, panel, picker).
 - **The notes file is for humans and agents.** Plain markdown, greppable,
   safe to hand-edit. Machine state lives elsewhere.
-- **Fits the existing workflow.** `<leader>fd` picker for the changed files,
-  gitsigns for hunks. The plugin adds threads to that, it does not replace
-  any of it.
+- **Fits the existing workflow.** gitsigns for hunks and the review diff,
+  a picker to fuzzy-find. The home links to them (changed files, diff base)
+  through hooks; it does not replace them.
 
 ## Concepts
 
@@ -58,28 +83,9 @@ not published yet (`resolved` locally differs from the remote status).
 ### Unread
 
 A thread is unread when it has a remote comment by someone else that I have
-not seen. "Seen" is stored in the sidecar, set when the thread is expanded or
-opened, or marked by key. Unread is only a highlight and a counter; it never
+not seen. "Seen" is stored in the sidecar, set when the thread is opened in the
+panel, or marked by key in the home. Unread is only a highlight and a counter; it never
 blocks anything.
-
-## Commands
-
-| Command            | Effect                                                         |
-| ------------------ | -------------------------------------------------------------- |
-| `:Review`          | toggle review mode for the current review (show / hide threads) |
-| `:Review pull`     | fetch remote threads and merge. Never sends anything.          |
-| `:Review publish`  | show a summary of what will be sent, confirm, send, then pull  |
-| `:Review list`     | the picker (see below)                                         |
-| `:Review approve`  | approve proposed comments (cursor thread, or `!` for all)      |
-| `:Review open`     | open the notes file                                            |
-
-Suggested keys (the plugin sets none): `<leader>rr` pull, `<leader>rp`
-publish, `<leader>rv` toggle view, `<leader>rn` new thread, `<leader>rN` new
-general thread, `<leader>rl` list, `]r` / `[r` next / previous unread.
-
-`pull` is cheap and safe, so it can also run later on opening a reviewed file and
-on `FocusGained` (not in the first version). Because it never sends,
-running it in the middle of a peer or pi adding comments is always fine.
 
 ## Safe pull (the "scare" fix)
 
@@ -110,54 +116,168 @@ Pull is a three-way merge with strict rules:
    cannot post twice.
 4. Pull again. Published local comments become remote comments.
 
-## Display
+## The home
 
-Review mode on, for each thread in a buffer:
+`:Review` (or the user's `<leader>rr`) opens the home: a normal buffer
+(`reviewnotes://home`, filetype `reviewhome`) in the current window, like
+fugitive's `:G` or neogit's status. `q` goes back to the previous buffer.
+It redraws when the notes file or the sidecar change (file watcher), so pi
+and pulls show up live.
 
-- **Collapsed** (default): one virtual line under the anchor, for example
-  `  3 comments, @alice: why 30s?` with a highlight for unread, unsent,
-  proposed and resolved. A sign marks the anchor range (a range gets a line
-  highlight on its first and last line).
-- **Expanded**: all comments as virtual lines under the anchor, wrapped to the
-  window, the local comment last and visually distinct.
-- `<CR>` on the anchor line (or a configurable key) expands or collapses the
-  thread under the cursor. `zR`-like "expand all / collapse all" is one more
-  key. Expanding marks the thread as seen.
-- Virtual lines are plain extmarks, so gitsigns hunk previews and diff views
-  are unaffected. Threads on lines outside a diff view buffer are shown in
-  whatever buffer holds that file.
+```
+Review  cs/9.5/usl-composed-drop-target  !1234 -> main
+2 unread  1 proposed  3 unsent  9 open  4 resolved      pulled 5 min ago
 
-Review mode off: no virtual lines, only the sign if `signs = true`.
+Unread (2)
+  > change                 @alice: please add a changelog entry
+  > Editor.py:267-293      @bob: why not reuse the helper?
+Proposed (1)
+  > UIUtils.py:213         me (proposed): Renamed, see fixup! ...
+Unsent (3)
+  > Editor.py:1217-1222    me: this leaks the stage
+  ...
+Open (9)
+Resolved (4)                                           (folded)
 
-### General threads
+p pull  P publish  m MR  f files  n new  <CR> open  ? help
+```
 
-General threads have no line, so they are shown in two places, both through
-the same thread renderer:
+- Sections in urgency order (as the picker sorts today), each a fold;
+  Resolved starts folded. A thread is one line: icon, anchor (path relative
+  to the repo, `change` for the whole change), last comment.
+- `<CR>` opens the thread in the panel and keeps the cursor in the home;
+  `o` goes to the code (and opens the panel). `<Tab>` toggles a section.
+- Thread keys (below) also work on the thread under the cursor, and on a
+  visual selection of threads (`x` on five lines resolves five threads).
+- Review-wide keys:
 
-- a **header** at the top of the first buffer of the review (or of any
-  buffer, option), as virtual lines above line 1, using the same collapsed /
-  expanded states as code threads;
-- the list (below), as an ordinary row with the anchor `change`.
+| key | action                                                              |
+| --- | ------------------------------------------------------------------- |
+| `p` | pull (never sends)                                                  |
+| `P` | publish: the summary, confirm, send                                 |
+| `n` | new thread on the whole change                                      |
+| `A` | approve every proposed comment                                      |
+| `D` | discard every proposed comment                                      |
+| `R` | mark read (the thread or selection under the cursor)                |
+| `m` | MR actions (hooks, see below): approve the MR, open in the browser  |
+| `f` | changed files (hook: the user's diff picker)                        |
+| `e` | edit the notes file                                                 |
+| `?` | help                                                                |
 
-There is no special-cased float, no special file position and no separate
-sync path: the anchor is just `nil` for the line and `nil` for the path.
+### MR hooks
 
-## The list
+The MR is part of the review (approving it, its target, the diff base), so
+the home is its natural place. The plugin stays forge-agnostic: the header
+line and `m` come from optional config.
 
-One picker source with one row type. A row is: icon for the most urgent state,
-anchor (`change`, `path`, `path:N`), tags, first line of the thread. The
-preview is the rendered thread. `confirm` jumps to the anchor and expands the
-thread; for `change` threads it opens the header in the current window.
-`items(buf)` stays the API for other pickers. Sorting: unread first, then
-proposed, then unsent, then the rest, each by path and line, `change` first.
+```lua
+mr = {
+  info = { "git-lab", "mr", "info", "--json" }, -- {ref, title, target, url}
+  actions = {
+    { key = "a", desc = "approve", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
+    { key = "o", desc = "browser", fn = function(mr) vim.ui.open(mr.url) end },
+  },
+},
+files = function(review) Snacks.picker.git_diff({ base = review.mr.target }) end,
+```
+
+`{input}` asks for a line of text first (empty is fine). Checkout of
+another MR stays outside: it changes which review is current, so it belongs
+to a global key (`<leader>rm` in the user config), not to the home of the
+current one.
+
+## The thread panel
+
+One thread at a time, as a real buffer (`reviewnotes://thread`, filetype
+`markdown`) in a split on the right, about 70 columns, reused across
+threads. A split, not a float: it stays open while moving through threads
+and while reading the code next to it.
+
+```
+Editor.py:267-293            open  2 comments  unread
+------------------------------------------------------
+@bob  2 days ago
+why not reuse the helper?
+
+me (not published)
+it needs the stage, the helper takes a layer
+------------------------------------------------------
+r reply  x resolve  a approve  d discard  ]t next  q close
+```
+
+- Opening a thread marks it seen. That removes "mark read" as an action;
+  the home keeps it (`R`) for clearing many at once.
+- The code window follows: opening a thread from the home or with `]t`
+  shows its anchor in the last code window, cursor on the first line, range
+  highlighted until the cursor leaves it. The panel never takes the code
+  window's place.
+- Change threads are threads like any other here; there is no header.
+- Thread keys, the same in the panel, the home and the picker:
+
+| key  | action                                                       |
+| ---- | ------------------------------------------------------------ |
+| `r`  | reply, or edit my unpublished reply (the composer)           |
+| `x`  | resolve / reopen; acknowledges "resolved by @bob" when unseen |
+| `a`  | approve the proposed comment                                 |
+| `d`  | discard my unpublished text (a new thread disappears)        |
+| `]t` | next thread, `[t` previous (home order)                      |
+| `]u` | next unread, `[u` previous                                   |
+| `o`  | go to the code                                               |
+| `q`  | close the panel                                              |
+
+`x`, `a`, `d` act at once (they are local until publish); `d` asks when it
+would delete a whole new thread.
+
+## Code buffers
+
+Signs only, no virtual lines: the anchor range gets a bar in the sign
+column, its last line the state icon (unread, proposed, unsent, open,
+resolved). Optional (`signs = false`). No header, no expand state, no
+redraw on resize. Anchors keep following edits through extmarks and are
+written back on save, as in v2.
+
+Global keys the README suggests (the plugin sets none):
+
+| key          | action                                                   |
+| ------------ | -------------------------------------------------------- |
+| `<leader>rr` | the home                                                 |
+| `<leader>rt` | the thread at the cursor in the panel (a menu if several) |
+| `<leader>rn` | new thread on the line, or the visual range              |
+| `<leader>rN` | new thread on the whole change                           |
+| `<leader>rf` | the picker                                               |
+| `]r` / `[r`  | next / previous thread in the code, unread first         |
+
+`<leader>rn` always starts a new thread, even on a line that has one;
+replies are `r` in the panel. v2's `add` did both, depending on the cursor.
+
+## Commands
+
+| Command           | Effect                                               |
+| ----------------- | ---------------------------------------------------- |
+| `:Review`         | the home                                             |
+| `:Review pull`    | pull, for scripts and autocmds                       |
+| `:Review publish` | publish (summary, confirm)                           |
+| `:Review edit`    | the notes file                                       |
+
+Everything else is a key in the home or the panel, or a Lua function
+(`require("review_notes").actions`).
+
+## The picker
+
+A finder, not a hub: the home is the hub. The plugin ships the snacks
+source (`require("review_notes.snacks").source`) so user config is one line,
+and the source binds the thread keys from `actions` as `<a-r>`, `<a-x>`,
+`<a-a>`, `<a-d>` (the same letters as the panel). `<CR>` opens the panel on
+the thread. `items(buf)` stays the API for other pickers, and quickfix
+(`:Review list`) goes away: the home replaces it.
 
 ## Writing
 
-`new` and `reply` open a small composer (a float near the cursor, markdown,
-full width of the text area). `<C-s>` or `:w` saves into the notes file, `q`
-or `<Esc><Esc>` cancels (the text is kept for next time). Reply to an expanded
-thread with the same key. Resolve and reopen toggle with a key, locally, and
-are published with everything else.
+The composer is the v2 float, opened under the panel's last line (or the
+cursor, for `<leader>rn` in code). `<C-s>` or `:w` saves, `q` closes and
+keeps the text for next time. New thread on a line or range from the code;
+new change thread from the home (`n`) or `<leader>rN`; reply from the
+panel or the home (`r`).
 
 ## Storage
 
@@ -237,10 +357,18 @@ Mostly as before, with these changes:
 | `store.lua`       | parse and write the markdown file and the sidecar, atomic  |
 | `merge.lua`       | pull merge and publish plan, pure functions, fully tested  |
 | `backend.lua`     | run the commands, the JSON contract                        |
-| `view.lua`        | extmarks, virtual lines, signs, expand and collapse        |
+| `review.lua`      | the current review: context, items, sorting, watcher       |
+| `actions.lua`     | the verbs, on items: resolve, approve, discard, reply, ... |
+| `home.lua`        | the home buffer                                            |
+| `panel.lua`       | the thread panel                                           |
+| `signs.lua`       | anchors (extmarks) and signs in code buffers               |
 | `compose.lua`     | the composer float                                         |
-| `list.lua`        | items, sorting, preview, actions                           |
-| `init.lua`        | setup, commands, autocmds, public API (thin)               |
+| `snacks.lua`      | the snacks picker source, built on `actions`               |
+| `init.lua`        | setup, commands, public API (thin)                         |
+
+`actions` is the one place a verb lives; the home, the panel and the picker
+bind keys to it and refresh after. `view.lua` (virtual lines, header,
+expand state, `topfill`) goes away.
 
 `merge.lua` and `store.lua` have no Neovim dependencies, so most of the
 logic is testable in plain Lua, and a fake backend script covers the rest.
@@ -255,22 +383,23 @@ logic is testable in plain Lua, and a fake backend script covers the rest.
 - Because proposed comments never publish without approval, running it in
   the middle of a pull from a peer is harmless.
 
-## Plan
+## Plan (v3)
 
-1. Agree on this document (format, commands, keys).
-2. `store.lua` and `merge.lua` with tests, including the pull and publish
-   rules above.
-3. `view.lua`: collapsed and expanded display, the toggle, general header.
-4. `compose.lua`, `list.lua`, commands.
-5. `git-lab` `publish` and the new thread shape; update the pi extension.
-6. README rewrite, remove the v1 modules.
+1. Split `init.lua`: `review.lua` and `actions.lua` out, no behaviour change
+   (tests stay green).
+2. `panel.lua`, then `home.lua` on top of `actions`.
+3. `signs.lua` replaces `view.lua`; remove the header, expand state and
+   their autocmds.
+4. `snacks.lua` source; MR hooks (`git-lab mr info --json` to add).
+5. Commands and README; trim the user config to the suggested keys.
 
 ## Decisions
 
-- General threads: header above line 1 of every buffer in the review,
-  collapsed to one line. It carries its own marker (a `change` label and
-  icon, drawn above the line) so it cannot be mistaken for a thread anchored
-  on line 1, which is drawn below the line.
-- `pull` is explicit (`<leader>rr`). Automatic pull can come later.
+- Change threads have no header in code buffers (v2 drew one above line 1).
+  They are rows in the home and threads in the panel like any other.
+- The thread panel is a right split, reused, not a float.
+- The home includes the MR (header line, `m` actions) through optional
+  hooks; checking out another MR stays a global key.
+- `pull` is explicit (`p` in the home). Automatic pull can come later.
 - A thread whose line was deleted stays on the nearest line and is marked
   `moved`.
