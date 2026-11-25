@@ -177,9 +177,27 @@ export default function reviewNotes(pi: ExtensionAPI) {
 
   const readThreads = (notesFile: string): Thread[] => parseThreads(readText(notesFile));
 
-  // A thread with a proposed comment waits for me; every other open thread is
-  // pi's: no turn tracking.
-  const needsPi = (t: Thread): boolean => !t.resolved && !t.comments.some((c) => c.proposed);
+  // Whose turn it is, from the thread alone: pi's when it is open and pi did
+  // not speak last. A fresh finding (a single proposed comment, from /review)
+  // is pi's too: it acts on its own findings by severity, with no approval
+  // step. After pi answers (a proposed reply last, or a resolve), the thread
+  // waits for me until I or the remote add something.
+  const needsPi = (t: Thread): boolean => {
+    if (t.resolved || t.comments.length === 0) return false;
+    const last = t.comments[t.comments.length - 1]!;
+    return !last.proposed || t.comments.length === 1;
+  };
+
+  const SEVERITY_RE = /^\s*(FIX|CHECK|CONSIDER|QUESTION|NIT)\b/;
+
+  // The severity a thread was filed with: the first tag in the conversation.
+  const severityOf = (t: Thread): string | undefined => {
+    for (const c of t.comments) {
+      const m = SEVERITY_RE.exec(c.body);
+      if (m) return m[1];
+    }
+    return undefined;
+  };
 
   // Scope: empty = everything, otherwise whitespace-separated files or
   // directories, relative to the cwd or absolute.
@@ -193,8 +211,8 @@ export default function reviewNotes(pi: ExtensionAPI) {
   };
 
   const reportNothingForPi = (all: Thread[], where: string, ctx: ExtensionCommandContext): void => {
-    const waiting = all.filter((t) => !t.resolved && t.comments.some((c) => c.proposed)).length;
-    const pending = waiting ? `: ${waiting} thread${waiting === 1 ? "" : "s"} with proposed comments to approve.` : ".";
+    const waiting = all.filter((t) => !t.resolved && !needsPi(t)).length;
+    const pending = waiting ? `: ${waiting} open thread${waiting === 1 ? "" : "s"} waiting for you.` : ".";
     ctx.ui.notify(`Nothing for pi ${where}${pending}`, "info");
   };
 
@@ -213,18 +231,33 @@ export default function reviewNotes(pi: ExtensionAPI) {
     "leading `\\`.";
 
   const label = (t: Thread): string => {
-    const last = t.comments[t.comments.length - 1]?.body.split("\n")[0] ?? "";
-    return `${t.anchor}${last ? `: "${last.slice(0, 60)}"` : ""}`;
+    const first = t.comments[t.comments.length - 1]?.body.split("\n")[0] ?? "";
+    const sev = severityOf(t);
+    return `${sev ? `[${sev}] ` : ""}${t.anchor}${first ? `: "${first.slice(0, 60)}"` : ""}`;
   };
 
-  const onlyThese = (selected: Thread[]): string =>
-    "Handle only these threads; leave all others as they are:\n" + selected.map((t) => `- ${label(t)}`).join("\n");
+  // Mandatory first, so a round that runs out of steam drops the optional ones.
+  const RANK: Record<string, number> = { FIX: 0, CHECK: 1, QUESTION: 2, CONSIDER: 3, NIT: 4 };
+  const byRank = (a: Thread, b: Thread): number =>
+    (RANK[severityOf(a) ?? ""] ?? 2) - (RANK[severityOf(b) ?? ""] ?? 2);
 
+  const onlyThese = (selected: Thread[]): string =>
+    "Handle only these threads, in this order; leave all others as they are:\n" +
+    [...selected].sort(byRank).map((t) => `- ${label(t)}`).join("\n");
+
+  // The severity ladder of /review decides how much a thread obliges pi. The
+  // findings are pi's own, and proposed comments are not published until I
+  // approve them, so acting on them needs no approval.
   const RESOLVE_RULES = [
     "Read every listed thread and the `change` threads before changing anything.",
-    "`me (local)` comments after your own proposed one are my answer, or why I reopened the thread.",
-    "Thread handled: append a `### me (proposed)` comment saying what changed (one line), and set `status: resolved`.",
-    "Thread unclear, or you disagree: change nothing else, append a `### me (proposed)` question, go on. Do not ask in the chat.",
+    "A thread's severity is the tag that starts its first comment; a later `me (local)` comment or an `@author` reply can change what is asked, and wins. No tag (a peer's or my own comment): treat it as a request, do it unless it is unclear.",
+    "FIX: mandatory. Make the change. If it is wrong or impossible, say why in the reply and leave the thread open.",
+    "CHECK: verify first (read the code, run the relevant tests). A real problem: fix it as for FIX. Not a problem: no change, reply with the evidence.",
+    "CONSIDER and NIT: optional, judge them. Do the change when it is clearly better and cheap; otherwise decline in the reply with a short reason. Never a reason to touch unrelated code.",
+    "QUESTION: answer from the code in the reply. Change code only if the answer exposes a bug.",
+    "Reporting: every thread you handle gets one `### me (proposed)` comment saying what you did or why not (one or two lines). Fixed, verified OK or declined: also set `status: resolved`. Needs a decision from me, or you could not do it: leave `status: open`.",
+    "Unclear: change nothing, append a `### me (proposed)` question, leave it open. Do not ask in the chat.",
+    "A thread that is only your own finding (a single `me (proposed)` comment) and is fixed: keep it, resolved, with the reply; I clear it later.",
     "Keep every thread and their order.",
   ];
 
@@ -577,7 +610,7 @@ ${bullets([
         ...RESOLVE_RULES,
         "No commit SHAs in the notes (they change on squash).",
         "End with no uncommitted changes to tracked files and no new untracked files of yours.",
-        "Print one line per note: fixup target commit, or the question.",
+        "Print one line per thread: severity, what you did (fixup target commit, evidence, or reason declined), or the question.",
       ])}`);
     },
   });

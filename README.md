@@ -397,13 +397,26 @@ same notes files:
 
 - `/review [request]` reviews the code and adds its findings as proposed
   comments for you to approve.
-- `/fixup [scope]` addresses the open threads. Threads on code become
-  `fixup!` commits, handled threads get a proposed reply and a resolve, and
-  unclear ones get a proposed question instead of a chat round-trip.
+- `/fixup [scope]` goes through the open threads where pi has not spoken
+  last, most severe first, and treats each by the tag it was filed with:
+  - `FIX`: must be done. If it cannot be, the reply says why and the thread
+    stays open.
+  - `CHECK`: verified first; a real problem is fixed, otherwise the reply
+    gives the evidence.
+  - `CONSIDER`, `NIT`: optional. Done when clearly better and cheap,
+    otherwise declined with a reason.
+  - `QUESTION`: answered from the code.
+  - No tag (a peer's comment, or yours): a request, done unless unclear.
 
-Everything pi writes is a `### me (proposed)` comment, which publish never
-sends until you approve it, so a round of pi is safe at any time. To install
-it, link or copy it into `~/.pi/agent/extensions/`.
+  Threads on code become `fixup!` commits. Each handled thread gets a
+  proposed reply, and is resolved when fixed, verified or declined; one that
+  needs your decision stays open.
+
+pi acts on its own findings without waiting for approval: approval is only
+the gate before something goes to the merge request. Everything pi writes is
+a `### me (proposed)` comment, which publish never sends until you approve it
+(`approve`, or `approve all`), so a round of pi is safe at any time. To
+install it, link or copy it into `~/.pi/agent/extensions/`.
 
 ## Development
 
