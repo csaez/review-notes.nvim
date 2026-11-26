@@ -348,7 +348,7 @@ function update_hints(buf)
   local h = lists[buf]
   local win = sidebar.win()
   if not (h and win and vim.api.nvim_win_get_buf(win) == buf) then return end
-  vim.wo[win][0].winbar = keys.hints(h.keys, vim.api.nvim_win_get_width(win))
+  vim.wo[win][0].statusline = keys.hints(h.keys, keys.bar_width(win))
 end
 
 -- Opening -----------------------------------------------------------------------------

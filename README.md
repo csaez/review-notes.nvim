@@ -86,7 +86,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 The plugin sets no global keymaps; its own buffers (the sidebar's list and
 thread, the composer) have their own keys. The sidebar shows the ones that
-apply in its top bar, and `?` lists them all.
+apply in its bottom bar, and `?` lists them all.
 `:checkhealth review_notes` checks that git and the backend commands are found.
 
 ## Quick start
@@ -145,7 +145,7 @@ threads.
 
 One thread. Showing it marks it seen and shows its code (range highlighted)
 in the code window; threads on the whole change are threads like any other
-here. The top bar shows where you are in the list (`3/19  2 unread`).
+here. The bottom bar shows where you are in the list (`2 unread  3 of 19`).
 
 | Key        | Does                                                  |
 | ---------- | ----------------------------------------------------- |
@@ -162,16 +162,24 @@ here. The top bar shows where you are in the list (`3/19  2 unread`).
 
 ### Finding the keys
 
-As in lazygit, the top bar of the sidebar lists the common keys, and only
-those that apply to the thread at hand: `a approve` appears on a thread
-with a proposed comment, `R read` on an unread one, and `x` says whether it
-resolves or reopens.
+As in lazygit, the bottom bar lists the common keys while the cursor is in
+the sidebar, and only those that apply to the thread at hand: `a approve`
+appears on a thread with a proposed comment, `R read` on an unread one, and
+`x` says whether it resolves or reopens. It is the sidebar's `statusline`,
+so with a global status line (`laststatus=3`) it takes over the bottom bar
+while the sidebar has the focus. Keys are highlighted with `ReviewKey`.
 
-If your statusline plugin draws a winbar in every window, exclude the
-sidebar's filetypes or it covers the bar. For lualine:
+A statusline plugin must leave the sidebar's filetypes alone, or it draws
+over the bar. For lualine (the winbar entry keeps the sidebar without a top
+bar, if you use one):
 
 ```lua
-options = { disabled_filetypes = { winbar = { "reviewlist", "reviewthread" } } }
+options = {
+  disabled_filetypes = {
+    statusline = { "reviewlist", "reviewthread" },
+    winbar = { "reviewlist", "reviewthread" },
+  },
+}
 ```
 
 `?` (or `g?`) opens every key of the mode, grouped. It stays open until
@@ -390,7 +398,7 @@ Icons and groups are in `require("review_notes").style`, one per state
 with `default = true`, so your colorscheme can override them: `ReviewUnread`,
 `ReviewProposed`, `ReviewUnsent`, `ReviewOpen`, `ReviewResolved`,
 `ReviewAuthor`, `ReviewMine`, `ReviewText`, `ReviewRange` (the code of the
-thread in the sidebar).
+thread in the sidebar), `ReviewKey` (keys in the hint bar).
 
 ## Extras
 

@@ -15,6 +15,11 @@ describe("sidebar, thread mode", function()
       end
     end
   end
+  -- The hint bar as drawn: the statusline evaluated, highlights gone.
+  local function bar(win)
+    win = win or vim.api.nvim_get_current_win()
+    return vim.api.nvim_eval_statusline(vim.wo[win].statusline, { winid = win, maxwidth = 200 }).str
+  end
   local function press(keys)
     local _, w = panel_lines()
     vim.api.nvim_set_current_win(w)
@@ -124,7 +129,7 @@ describe("sidebar, thread mode", function()
     vim.wo.winfixbuf = false
     vim.cmd("edit a.c")
     assert.is_false(vim.wo.winfixbuf)
-    assert.are.equal("", vim.wo.winbar)
+    assert.are.equal(vim.go.statusline, vim.wo.statusline)
   end)
 
   it("opens a window for the code when the sidebar is alone", function()
@@ -139,16 +144,16 @@ describe("sidebar, thread mode", function()
     assert.are.equal(2, vim.api.nvim_win_get_cursor(code)[1])
   end)
 
-  it("shows where it is in the winbar", function()
+  it("shows where it is in the hint bar", function()
     thread.show(ctx, "t1")
     local _, w = panel_lines()
-    assert.truthy(vim.wo[w].winbar:find("1/3", 1, true))
+    assert.truthy(bar(w):find("1 of 3", 1, true))
     -- Only what applies: t1 has no proposed comment and no text of mine.
-    assert.is_nil(vim.wo[w].winbar:find("approve", 1, true))
-    assert.is_nil(vim.wo[w].winbar:find("discard", 1, true))
+    assert.is_nil(bar(w):find("approve", 1, true))
+    assert.is_nil(bar(w):find("discard", 1, true))
     thread.show(ctx, "new:a.c:4#1")
-    assert.truthy(vim.wo[w].winbar:find("a approve", 1, true))
-    assert.truthy(vim.wo[w].winbar:find("d discard", 1, true))
+    assert.truthy(bar(w):find("a approve", 1, true))
+    assert.truthy(bar(w):find("d discard", 1, true))
   end)
 
   it("items search the whole conversation, for the finder", function()

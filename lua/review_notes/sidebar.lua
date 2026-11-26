@@ -154,6 +154,8 @@ local BASE = {
   colorcolumn = "",
   spell = false,
   list = false,
+  -- The hint bar is the statusline (set by each mode); nothing on top.
+  winbar = "",
 }
 
 ---@class review_notes.ShowOpts

@@ -16,6 +16,11 @@ describe("sidebar, list mode", function()
   local function on(pattern)
     vim.api.nvim_win_set_cursor(0, { assert(line_of(pattern), "no line with " .. pattern), 0 })
   end
+  -- The hint bar as drawn: the statusline evaluated, highlights gone.
+  local function bar(win)
+    win = win or vim.api.nvim_get_current_win()
+    return vim.api.nvim_eval_statusline(vim.wo[win].statusline, { winid = win, maxwidth = 200 }).str
+  end
   local function press(keys) vim.api.nvim_feedkeys(vim.keycode(keys), "x", false) end
 
   before_each(function()
@@ -120,20 +125,20 @@ describe("sidebar, list mode", function()
   it("hints only the keys that apply to the row under the cursor", function()
     on("why?")
     vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
-    local bar = vim.wo.winbar
-    assert.truthy(bar:find("R read", 1, true))
-    assert.is_nil(bar:find("a approve", 1, true))
-    assert.truthy(bar:find("? keys", 1, true))
+    local text = bar()
+    assert.truthy(text:find("R read", 1, true))
+    assert.is_nil(text:find("a approve", 1, true))
+    assert.truthy(text:find("? keys", 1, true))
     on("NIT: pi says")
     vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
-    bar = vim.wo.winbar
-    assert.truthy(bar:find("a approve", 1, true))
-    assert.is_nil(bar:find("R read", 1, true))
+    text = bar()
+    assert.truthy(text:find("a approve", 1, true))
+    assert.is_nil(text:find("R read", 1, true))
     -- Off a thread: only the review-wide keys.
     vim.api.nvim_win_set_cursor(0, { 1, 0 })
     vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
-    assert.is_nil(vim.wo.winbar:find("reply", 1, true))
-    assert.truthy(vim.wo.winbar:find("p pull", 1, true))
+    assert.is_nil(bar():find("reply", 1, true))
+    assert.truthy(bar():find("p pull", 1, true))
   end)
 
   it("? lists every key, and a key pressed there runs on the row", function()

@@ -1,7 +1,7 @@
 -- Keys of the sidebar modes, declared once: each mode binds them, draws its
--- hint bar from them (only those that apply to the thread at hand, like
--- lazygit's options bar) and lists them in the `?` menu, where pressing a
--- key or <CR> on a row runs it.
+-- hint bar from them (the sidebar's statusline, with only the keys that
+-- apply to the thread at hand, like lazygit's options bar) and lists them in
+-- the `?` menu, where pressing a key or <CR> on a row runs it.
 local M = {}
 
 ---@class review_notes.Key
@@ -42,30 +42,42 @@ function M.when(get, label, test)
   end
 end
 
---- The hint bar: `lhs label` for each key that applies now, in order, as
---- many as fit in *width*; `? keys` always ends it.
+--- Room for the hint bar of *win*: its width, or the screen's with a
+--- global statusline.
+---@param win integer
+---@return integer
+function M.bar_width(win)
+  return vim.o.laststatus == 3 and vim.o.columns or vim.api.nvim_win_get_width(win)
+end
+
+--- The hint bar, a 'statusline' value: `key label` for each key that
+--- applies now, in order, as many as fit in *width*; `? keys` always ends
+--- it. *right* goes on the right edge (the place in the list).
 ---@param keys review_notes.Key[]
 ---@param width integer
----@param prefix string? shown first (the place in the list)
+---@param right string?
 ---@return string
-function M.hints(keys, width, prefix)
-  local head = " " .. (prefix and (prefix .. "   ") or "")
-  local tail = "? keys"
-  local used = #head + #tail
-  local parts = {}
+function M.hints(keys, width, right)
+  local function esc(text) return (text:gsub("%%", "%%%%")) end
+  local tail = { lhs = "?", label = "keys" }
+  local used = 1 + #tail.lhs + 1 + #tail.label + (right and (#right + 3) or 1)
+  local shown = {}
   for _, k in ipairs(keys) do
     local label = k.hint
     if type(label) == "function" then label = label() end
     if label then
-      local part = k.lhs .. " " .. label
-      if used + #part + 2 > width then break end
-      used = used + #part + 2
-      table.insert(parts, part)
+      local size = #k.lhs + 1 + #label + 2
+      if used + size > width then break end
+      used = used + size
+      table.insert(shown, { lhs = k.lhs, label = label })
     end
   end
-  table.insert(parts, tail)
-  local bar = (head .. table.concat(parts, "  ")):gsub("%%", "%%%%")
-  return bar
+  table.insert(shown, tail)
+  local parts = {}
+  for _, p in ipairs(shown) do
+    table.insert(parts, "%#ReviewKey#" .. esc(p.lhs) .. "%* " .. esc(p.label))
+  end
+  return " " .. table.concat(parts, "  ") .. "%=" .. (right and (esc(right) .. " ") or "")
 end
 
 --- The `?` menu: a float over the current window listing *keys* by group.

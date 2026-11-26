@@ -21,6 +21,7 @@ function M.set_highlights()
   hl("ReviewMine", "Special")
   hl("ReviewText", "Comment")
   hl("ReviewRange", "Visual")
+  hl("ReviewKey", "Special")
 end
 
 ---@class review_notes.Drawn

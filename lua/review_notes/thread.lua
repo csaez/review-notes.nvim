@@ -91,9 +91,9 @@ local function render()
   for _, i in ipairs(items) do
     if i.state == "unread" then unread = unread + 1 end
   end
-  local place = at > 0 and ("%d/%d"):format(at, #order) or ("-/%d"):format(#order)
-  if unread > 0 then place = place .. ("  %d unread"):format(unread) end
-  vim.wo[win][0].winbar = keys.hints(KEYS, vim.api.nvim_win_get_width(win), place)
+  local place = at > 0 and ("%d of %d"):format(at, #order) or ("%d threads"):format(#order)
+  if unread > 0 then place = ("%d unread  "):format(unread) .. place end
+  vim.wo[win][0].statusline = keys.hints(KEYS, keys.bar_width(win), place)
 end
 
 -- Acting ------------------------------------------------------------------------
@@ -165,7 +165,7 @@ local function ensure_buf()
   vim.bo[buf].bufhidden = "hide"
   vim.bo[buf].swapfile = false
   vim.api.nvim_buf_set_name(buf, "reviewnotes://thread")
-  -- Its own filetype, so statusline plugins can leave its winbar alone;
+  -- Its own filetype, so statusline plugins can leave its hint bar alone;
   -- markdown highlighting through treesitter, else the syntax file.
   vim.bo[buf].filetype = "reviewthread"
   if not pcall(vim.treesitter.start, buf, "markdown") then vim.bo[buf].syntax = "markdown" end

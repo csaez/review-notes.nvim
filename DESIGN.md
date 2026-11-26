@@ -110,8 +110,13 @@ window:
 - **thread**: one thread (`reviewnotes://thread`, filetype `reviewthread`,
   highlighted as markdown).
 
-Statusline plugins that draw a winbar in every window (lualine) must
-exclude `reviewlist` and `reviewthread`, or they cover the hint bar.
+The hint bar is the sidebar window's `statusline`, at the bottom like
+lazygit's. With a global status line (`laststatus=3`) Neovim draws the
+focused window's own `statusline`, so the bottom bar turns into the hint
+bar while the cursor is in the sidebar and back when it leaves. Statusline
+plugins (lualine) must exclude `reviewlist` and `reviewthread`, or they
+overwrite it; excluding them from their winbar too keeps the sidebar
+without a top bar.
 
 The window has `winfixbuf` set (the plugin lifts it to switch modes), so
 `:edit` and pickers that honor it never open a file in the sidebar. Window
@@ -130,7 +135,7 @@ empty buffer. Both buffers redraw when the notes file or the sidecar change
 Taken from lazygit: the keys show where they are used, and only the ones
 that apply.
 
-- **Hint bar.** Each mode's winbar lists its common keys, filtered by the
+- **Hint bar.** Each mode's status line lists its common keys, filtered by the
   thread at hand (the one under the cursor in the list, the one shown in
   thread mode): `a approve` only with a proposed comment, `d discard` only
   with unpublished text, `R read` only when unread, `x` labelled
@@ -213,8 +218,8 @@ why not reuse the helper?
 it needs the stage, the helper takes a layer
 ```
 
-The winbar shows the place in the list and the keys that apply:
-`3/19  2 unread   r reply  x resolve  a approve  ]t next  - list  ? keys`.
+The hint bar shows the keys that apply, and the place in the list on the
+right: `r reply  x resolve  a approve  ]t next  - list  ? keys    2 unread  3 of 19`.
 
 - Showing a thread marks it seen; `R` in the list stays for clearing many
   at once.
@@ -412,7 +417,7 @@ The git-lab script in `extras/` implements it for GitLab.
 | `sidebar.lua`     | the sidebar window and the code window                     |
 | `keys.lua`        | key declarations: mappings, hint bar, `?` menu             |
 | `list.lua`        | list mode: drawing, folds, review-wide keys, MR hooks      |
-| `thread.lua`      | thread mode: drawing, winbar, thread keys, list order      |
+| `thread.lua`      | thread mode: drawing, hint bar, thread keys, list order    |
 | `signs.lua`       | anchors (extmarks) and signs in code buffers               |
 | `compose.lua`     | the composer float                                         |
 | `snacks.lua`      | the finder, a snacks picker source                         |
