@@ -85,7 +85,8 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```
 
 The plugin sets no global keymaps; its own buffers (the sidebar's list and
-thread, the composer) have their own keys, listed by `g?` in each.
+thread, the composer) have their own keys. The sidebar shows the ones that
+apply in its top bar, and `?` lists them all.
 `:checkhealth review_notes` checks that git and the backend commands are found.
 
 ## Quick start
@@ -105,7 +106,8 @@ thread, the composer) have their own keys, listed by `g?` in each.
 ### The sidebar
 
 `:Review` (or `toggle()`) opens a window on the right of the tab and moves
-there; from inside, it closes it. It shows either the list of the review or
+there. Pressed again it goes back one level: from a thread to the list, from
+the list it closes the sidebar. It shows either the list of the review or
 one thread, and redraws when the notes change, so a pull or an agent writing
 shows up live. Code always goes to the code window, the last window you were
 in on a file (a new one when the sidebar is alone); nothing opens a file in
@@ -133,7 +135,8 @@ from the left to fit.
 | `m`       | merge request actions (see [Configuration](#configuration))  |
 | `f`       | changed files (your function, see Configuration)             |
 | `e`       | edit the notes file (in the code window)                     |
-| `q`, `g?` | close the sidebar, help                                      |
+| `q`       | close the sidebar                                            |
+| `?`       | every key, to read or run (see below)                        |
 
 `x`, `a`, `d` and `R` also take a visual selection: `Vjjx` resolves three
 threads.
@@ -142,7 +145,7 @@ threads.
 
 One thread. Showing it marks it seen and shows its code (range highlighted)
 in the code window; threads on the whole change are threads like any other
-here. The winbar shows where you are in the list (`3/19  2 unread`).
+here. The top bar shows where you are in the list (`3/19  2 unread`).
 
 | Key        | Does                                                  |
 | ---------- | ----------------------------------------------------- |
@@ -154,7 +157,19 @@ here. The winbar shows where you are in the list (`3/19  2 unread`).
 | `]u` `[u`  | next / previous unread                                |
 | `o`        | go to the code                                        |
 | `-`, `<BS>`| back to the list, on this thread                      |
-| `q`, `g?`  | close the sidebar, help                               |
+| `q`        | close the sidebar                                     |
+| `?`        | every key, to read or run (see below)                 |
+
+### Finding the keys
+
+As in lazygit, the top bar of the sidebar lists the common keys, and only
+those that apply to the thread at hand: `a approve` appears on a thread
+with a proposed comment, `R read` on an unread one, and `x` says whether it
+resolves or reopens.
+
+`?` (or `g?`) opens every key of the mode, grouped. It stays open until
+`q` or `<Esc>`. Press a key there, or `<CR>` on its row, to run it on the
+thread under the cursor; `/` filters the list.
 
 ### In the code
 
@@ -176,7 +191,7 @@ saving it empty removes it.
 
 | Command            | What it does                                              |
 | ------------------ | --------------------------------------------------------- |
-| `:Review`          | the sidebar (toggle)                                      |
+| `:Review`          | the sidebar: open, back to the list, close                |
 | `:Review pull`     | bring the remote threads in; never sends                  |
 | `:Review publish`  | pull, show what would be sent, confirm, send, pull        |
 | `:Review thread`   | the thread at the cursor in the sidebar                   |

@@ -10,6 +10,7 @@ local backend = require("review_notes.backend")
 local thread = require("review_notes.thread")
 local sidebar = require("review_notes.sidebar")
 local sync = require("review_notes.sync")
+local keys = require("review_notes.keys")
 
 local M = {}
 
@@ -23,20 +24,6 @@ local SECTIONS = {
   { state = "resolved", title = "Resolved", folded = true },
 }
 
-local HELP = {
-  "Threads (on the line under the cursor, or a visual selection):",
-  "  <CR> show the thread      o  go to the code",
-  "  r    reply                x  resolve / reopen",
-  "  a    approve proposed     d  discard unpublished",
-  "  R    mark read",
-  "Review:",
-  "  p    pull (sends nothing) P  publish (summary, confirm)",
-  "  n    new thread on the whole change",
-  "  A    approve all proposed D  discard all proposed",
-  "  m    merge request actions",
-  "  f    changed files        e  edit the notes file",
-  "  <Tab> fold a section      q  close the sidebar",
-}
 
 ---@class review_notes.ListState
 ---@field ctx review_notes.Context
@@ -47,6 +34,7 @@ local HELP = {
 ---@field want string|true|nil the next draw puts the cursor on this thread
 ---  (true: the first one)
 ---@field last string? the thread shown last, for the cursor when coming back
+---@field keys review_notes.Key[]
 
 ---@type table<integer, review_notes.ListState> by buffer
 local lists = {}
@@ -67,6 +55,8 @@ local function ago(t)
 end
 
 -- Drawing ---------------------------------------------------------------------
+
+local update_hints ---@type fun(buf: integer)
 
 local function draw(buf)
   local h = lists[buf]
@@ -184,6 +174,7 @@ local function draw(buf)
       end
     end)
   end
+  update_hints(buf)
 end
 
 local function redraw_all()
@@ -288,55 +279,76 @@ end
 
 -- Keys ------------------------------------------------------------------------------
 
-local function set_keys(buf)
-  local function map(lhs, fn, desc, modes)
-    vim.keymap.set(modes or "n", lhs, fn, { buffer = buf, nowait = true, desc = desc })
-  end
-  local nx = { "n", "x" }
+---@param buf integer
+---@return review_notes.Key[]
+local function keys_of(buf)
   local h = lists[buf]
+  local nx = { "n", "x" }
+  local function under_cursor()
+    local win = sidebar.win()
+    if not win or vim.api.nvim_win_get_buf(win) ~= buf then return nil end
+    return h.rows[vim.api.nvim_win_get_cursor(win)[1]]
+  end
+  local function when(label, test) return keys.when(under_cursor, label, test) end
+  return {
+    { lhs = "<CR>", group = "Thread", desc = "show the thread", hint = when("open"), fn = function()
+      local item = one(buf)
+      if item then thread.show(item.ctx, item.key, { reorder = true, focus = "sidebar" }) end
+    end },
+    { lhs = "o", group = "Thread", desc = "show the thread and go to the code", fn = function()
+      local item = one(buf)
+      if item then thread.go_to(item) end
+    end },
+    { lhs = "r", group = "Thread", desc = "reply, or edit my reply not published yet", hint = when("reply"), fn = function()
+      local item = one(buf)
+      if item then actions.reply(item.ctx, item.entry, sidebar.win()) end
+    end },
+    { lhs = "x", group = "Thread", desc = "resolve / reopen (also a visual selection)", modes = nx,
+      hint = when(actions.resolve_verb), fn = each(buf, actions.resolve) },
+    { lhs = "a", group = "Thread", desc = "approve proposed (also a visual selection)", modes = nx,
+      hint = when("approve", actions.can_approve), fn = function() actions.approve_items(selected(buf)) end },
+    { lhs = "d", group = "Thread", desc = "discard unpublished (also a visual selection)", modes = nx,
+      hint = when("discard", actions.can_discard), fn = function() actions.discard_items(selected(buf)) end },
+    { lhs = "R", group = "Thread", desc = "mark read (also a visual selection)", modes = nx,
+      hint = when("read", function(i) return i.state == "unread" end), fn = each(buf, actions.read) },
 
-  map("<CR>", function()
-    local item = one(buf)
-    if item then thread.show(item.ctx, item.key, { reorder = true, focus = "sidebar" }) end
-  end, "show the thread")
-  map("o", function()
-    local item = one(buf)
-    if item then thread.go_to(item) end
-  end, "go to the code")
-  map("r", function()
-    local item = one(buf)
-    if item then actions.reply(item.ctx, item.entry, sidebar.win()) end
-  end, "reply")
-  map("x", each(buf, actions.resolve), "resolve / reopen", nx)
-  map("a", function() actions.approve_items(selected(buf)) end, "approve proposed", nx)
-  map("d", function() actions.discard_items(selected(buf)) end, "discard unpublished", nx)
-  map("R", each(buf, actions.read), "mark read", nx)
+    { lhs = "p", group = "Review", desc = "pull (sends nothing)", hint = "pull", fn = function() sync.pull(h.ctx) end },
+    { lhs = "P", group = "Review", desc = "publish: summary, confirm, send", hint = "publish", fn = function() sync.publish(h.ctx) end },
+    { lhs = "n", group = "Review", desc = "new thread on the whole change", fn = function() actions.new_thread(h.ctx, {}) end },
+    { lhs = "A", group = "Review", desc = "approve every proposed comment", fn = function()
+      notify(("approved %d proposed comments"):format(actions.approve_all(h.ctx)))
+    end },
+    { lhs = "D", group = "Review", desc = "discard every proposed comment", fn = function() actions.discard_proposed(h.ctx) end },
+    { lhs = "m", group = "Review", desc = "merge request actions", hint = "MR", fn = function() mr_menu(buf) end },
+    { lhs = "f", group = "Review", desc = "changed files", fn = function()
+      if config.values.files then return config.values.files(info(buf)) end
+      notify("no `files` function configured")
+    end },
+    { lhs = "e", group = "Review", desc = "edit the notes file (in the code window)", fn = function() sidebar.edit(h.ctx.path) end },
 
-  map("p", function() sync.pull(h.ctx) end, "pull")
-  map("P", function() sync.publish(h.ctx) end, "publish")
-  map("n", function() actions.new_thread(h.ctx, {}) end, "new thread on the change")
-  map("A", function() notify(("approved %d proposed comments"):format(actions.approve_all(h.ctx))) end, "approve all proposed")
-  map("D", function() actions.discard_proposed(h.ctx) end, "discard all proposed")
-  map("m", function() mr_menu(buf) end, "merge request")
-  map("f", function()
-    if config.values.files then return config.values.files(info(buf)) end
-    notify("no `files` function configured")
-  end, "changed files")
-  map("e", function() sidebar.edit(h.ctx.path) end, "edit the notes file")
-  map("<Tab>", function()
-    local lnum = vim.api.nvim_win_get_cursor(0)[1]
-    local start = vim.fn.foldclosed(lnum)
-    local line = vim.fn.getline(start ~= -1 and start or lnum)
-    for _, s in ipairs(SECTIONS) do
-      if line:find(s.title .. " (", 1, true) then
-        h.folded[s.state] = start == -1
-        break
+    { lhs = "<Tab>", group = "Move", desc = "fold or unfold a section", fn = function()
+      local lnum = vim.api.nvim_win_get_cursor(0)[1]
+      local start = vim.fn.foldclosed(lnum)
+      local line = vim.fn.getline(start ~= -1 and start or lnum)
+      for _, s in ipairs(SECTIONS) do
+        if line:find(s.title .. " (", 1, true) then
+          h.folded[s.state] = start == -1
+          break
+        end
       end
-    end
-    vim.cmd("silent! normal! za")
-  end, "fold section")
-  map("q", sidebar.close, "close the sidebar")
-  map("g?", function() notify(table.concat(HELP, "\n")) end, "help")
+      vim.cmd("silent! normal! za")
+    end },
+    { lhs = "q", group = "Move", desc = "close the sidebar", fn = function() sidebar.close() end },
+  }
+end
+
+--- The hint bar follows the thread under the cursor.
+---@param buf integer
+function update_hints(buf)
+  local h = lists[buf]
+  local win = sidebar.win()
+  if not (h and win and vim.api.nvim_win_get_buf(win) == buf) then return end
+  vim.wo[win][0].winbar = keys.hints(h.keys, vim.api.nvim_win_get_width(win))
 end
 
 -- Opening -----------------------------------------------------------------------------
@@ -353,10 +365,12 @@ local function ensure_buf(ctx)
   vim.bo[buf].bufhidden = "hide"
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = "reviewlist"
-  lists[buf] = { ctx = ctx, rows = {}, folded = {}, want = true }
+  lists[buf] = { ctx = ctx, rows = {}, folded = {}, want = true, keys = {} }
   review.bind(buf, ctx)
   sidebar.register(buf)
-  set_keys(buf)
+  lists[buf].keys = keys_of(buf)
+  keys.bind(buf, "Review", lists[buf].keys)
+  vim.api.nvim_create_autocmd("CursorMoved", { buffer = buf, callback = function() update_hints(buf) end })
   vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, callback = function()
     lists[buf] = nil
     review.bind(buf, nil)
@@ -390,18 +404,22 @@ function M.open(ctx, opts)
       cursorline = true,
       foldtext = "v:lua.require'review_notes.list'.foldtext()",
       fillchars = "fold: ",
-      winbar = "",
     },
   })
   draw(buf)
+  update_hints(buf)
 end
 
---- Toggle: open the list of *ctx*, or close the sidebar when the cursor is
---- already in it.
+--- Toggle, one level at a time: from the code, open the list of *ctx*;
+--- from a thread in the sidebar, back to the list; from the list, close.
 ---@param ctx review_notes.Context?
 function M.toggle(ctx)
   local win = sidebar.win()
-  if win and win == vim.api.nvim_get_current_win() then return sidebar.close() end
+  if win and win == vim.api.nvim_get_current_win() then
+    if lists[vim.api.nvim_win_get_buf(win)] then return sidebar.close() end
+    local tctx, key = thread.shown()
+    return M.open(tctx or ctx, { key = key })
+  end
   M.open(ctx)
 end
 

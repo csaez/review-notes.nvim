@@ -5,6 +5,7 @@
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local sidebar = require("review_notes.sidebar")
+local keys = require("review_notes.keys")
 
 local M = {}
 
@@ -18,17 +19,7 @@ local ns = vim.api.nvim_create_namespace("review_notes_thread")
 ---  thread read on the way does not jump to another section
 local state = { order = {} }
 
-local HELP = {
-  "r   reply, or edit my reply not published yet",
-  "x   resolve / reopen (accepts a resolve by someone else)",
-  "a   approve the proposed comment",
-  "d   discard my unpublished text (a new thread goes entirely)",
-  "]t  next thread, [t previous",
-  "]u  next unread, [u previous",
-  "o   go to the code",
-  "-   back to the list",
-  "q   close the sidebar",
-}
+local KEYS ---@type review_notes.Key[] set below, they need the functions
 
 local function notify(msg, level) review.notify(msg, level) end
 
@@ -102,7 +93,7 @@ local function render()
   end
   local place = at > 0 and ("%d/%d"):format(at, #order) or ("-/%d"):format(#order)
   if unread > 0 then place = place .. ("  %d unread"):format(unread) end
-  vim.wo[win][0].winbar = " " .. place .. "   r reply  x resolve  a approve  d discard  - list  g? help"
+  vim.wo[win][0].winbar = keys.hints(KEYS, vim.api.nvim_win_get_width(win), place)
 end
 
 -- Acting ------------------------------------------------------------------------
@@ -143,25 +134,27 @@ local function back_to_list()
   if state.ctx then require("review_notes.list").open(state.ctx, { key = state.key }) end
 end
 
-local function map(lhs, fn, desc)
-  vim.keymap.set("n", lhs, fn, { buffer = state.buf, nowait = true, desc = desc })
-end
+local function when(label, test) return keys.when(current, label, test) end
 
-local function set_keys()
-  map("r", function() with_item(function(i) actions.reply(i.ctx, i.entry, sidebar.win()) end) end, "reply")
-  map("x", function() with_item(function(i) actions.resolve(i.ctx, i.key) end) end, "resolve / reopen")
-  map("a", function() with_item(function(i) actions.approve_items({ i }) end) end, "approve proposed")
-  map("d", function() with_item(function(i) actions.discard_items({ i }) end) end, "discard unpublished")
-  map("]t", function() step(1) end, "next thread")
-  map("[t", function() step(-1) end, "previous thread")
-  map("]u", function() step(1, true) end, "next unread")
-  map("[u", function() step(-1, true) end, "previous unread")
-  map("o", function() with_item(function(i) sidebar.show_code(i, true) end) end, "go to the code")
-  map("-", back_to_list, "back to the list")
-  map("<BS>", back_to_list, "back to the list")
-  map("q", sidebar.close, "close the sidebar")
-  map("g?", function() notify(table.concat(HELP, "\n")) end, "help")
-end
+KEYS = {
+  { lhs = "r", group = "Thread", desc = "reply, or edit my reply not published yet", hint = when("reply"),
+    fn = function() with_item(function(i) actions.reply(i.ctx, i.entry, sidebar.win()) end) end },
+  { lhs = "x", group = "Thread", desc = "resolve / reopen (accepts a resolve by someone else)", hint = when(actions.resolve_verb),
+    fn = function() with_item(function(i) actions.resolve(i.ctx, i.key) end) end },
+  { lhs = "a", group = "Thread", desc = "approve the proposed comment", hint = when("approve", actions.can_approve),
+    fn = function() with_item(function(i) actions.approve_items({ i }) end) end },
+  { lhs = "d", group = "Thread", desc = "discard my unpublished text (a new thread goes entirely)", hint = when("discard", actions.can_discard),
+    fn = function() with_item(function(i) actions.discard_items({ i }) end) end },
+  { lhs = "o", group = "Thread", desc = "go to the code", hint = when("code", function(i) return i.has_code end),
+    fn = function() with_item(function(i) sidebar.show_code(i, true) end) end },
+  { lhs = "]t", group = "Move", desc = "next thread", hint = "next", fn = function() step(1) end },
+  { lhs = "[t", group = "Move", desc = "previous thread", fn = function() step(-1) end },
+  { lhs = "]u", group = "Move", desc = "next unread", fn = function() step(1, true) end },
+  { lhs = "[u", group = "Move", desc = "previous unread", fn = function() step(-1, true) end },
+  { lhs = "-", group = "Move", desc = "back to the list, on this thread", hint = "list", fn = back_to_list },
+  { lhs = "<BS>", group = "Move", desc = "back to the list, on this thread", fn = back_to_list },
+  { lhs = "q", group = "Move", desc = "close the sidebar", fn = function() sidebar.close() end },
+}
 
 ---@return integer
 local function ensure_buf()
@@ -175,7 +168,7 @@ local function ensure_buf()
   vim.bo[buf].filetype = "markdown"
   vim.bo[buf].modifiable = false
   sidebar.register(buf)
-  set_keys()
+  keys.bind(buf, "Thread", KEYS)
   return buf
 end
 

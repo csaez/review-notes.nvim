@@ -69,12 +69,30 @@ local function drop_unpublished(t, doc, side)
   end
 end
 
---- Whether *entry* has anything `discard` would remove.
----@param entry review_notes.Entry
+--- Whether *item* has anything `discard` would remove.
+---@param item review_notes.Item
 ---@return boolean
-local function can_discard(entry)
-  local f = merge.flags(entry.thread, entry.state)
-  return merge.has_unpublished(entry.thread) or (f.unsent and entry.thread.id ~= nil)
+function M.can_discard(item)
+  local e = item.entry
+  local f = merge.flags(e.thread, e.state)
+  return merge.has_unpublished(e.thread) or (f.unsent and e.thread.id ~= nil)
+end
+
+--- Whether *item* has a proposed comment to approve.
+---@param item review_notes.Item
+---@return boolean
+function M.can_approve(item)
+  return merge.flags(item.entry.thread, item.entry.state).proposed
+end
+
+--- What `resolve` does to *item*: "accept" (someone else's resolve),
+--- "reopen" or "resolve".
+---@param item review_notes.Item
+---@return string
+function M.resolve_verb(item)
+  local t = item.entry.thread
+  if merge.resolved_unseen(t, item.entry.state) then return "accept" end
+  return t.status == "resolved" and "reopen" or "resolve"
 end
 
 --- Delete the unpublished part of a thread (mine and proposed). Remote
@@ -89,7 +107,7 @@ end
 ---@param items review_notes.Item[]
 function M.approve_items(items)
   if #items == 0 then return end
-  local list = vim.tbl_filter(function(i) return merge.flags(i.entry.thread, i.entry.state).proposed end, items)
+  local list = vim.tbl_filter(M.can_approve, items)
   if #list == 0 then return notify("nothing proposed here") end
   for _, i in ipairs(list) do M.approve(i.ctx, i.key) end
 end
@@ -100,7 +118,7 @@ end
 ---@param done fun()?
 function M.discard_items(items, done)
   if #items == 0 then return end
-  local list = vim.tbl_filter(function(i) return can_discard(i.entry) end, items)
+  local list = vim.tbl_filter(M.can_discard, items)
   if #list == 0 then return notify("nothing unpublished here") end
   local new = #vim.tbl_filter(function(i) return not i.entry.thread.id end, list)
   local function go()

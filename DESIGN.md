@@ -114,10 +114,31 @@ The window has `winfixbuf` set (the plugin lifts it to switch modes), so
 options are set on the sidebar window only and never leak into code
 windows.
 
-`:Review` opens the sidebar in list mode and moves the cursor there; when
-the cursor is already in the sidebar, it closes it. `q` closes it from
-either mode; as the last window of the tab it leaves an empty buffer. Both buffers redraw when the notes file or the sidecar change
+`:Review` steps one level at a time, like `<Esc>` in lazygit: from a code
+window it opens the sidebar in list mode and moves the cursor there; from
+thread mode it goes back to the list; from the list it closes the sidebar.
+`q` closes it from either mode; as the last window of the tab it leaves an
+empty buffer. Both buffers redraw when the notes file or the sidecar change
 (file watcher), so pi and pulls show up live.
+
+### Finding the keys
+
+Taken from lazygit: the keys show where they are used, and only the ones
+that apply.
+
+- **Hint bar.** Each mode's winbar lists its common keys, filtered by the
+  thread at hand (the one under the cursor in the list, the one shown in
+  thread mode): `a approve` only with a proposed comment, `d discard` only
+  with unpublished text, `R read` only when unread, `x` labelled
+  `resolve`, `reopen` or `accept`. Off a thread, the list shows only its
+  review-wide keys. Keys that do not fit the width are dropped from the
+  end; `? keys` always stays.
+- **`?` menu** (also `g?`). A float over the sidebar listing every key of
+  the mode by group (Thread, Review, Move). It stays until `q`, `<Esc>` or
+  `?`. Pressing a key, or `<CR>` on its row, closes it and runs the key on
+  the thread under the cursor; `/` filters. It is built from the same key
+  declarations as the mappings and the hint bar (`keys.lua`), so the three
+  never disagree.
 
 ### The code window
 
@@ -173,7 +194,7 @@ Resolved (4)  ...
 | `f`     | changed files (hook: the user's diff picker)                  |
 | `e`     | edit the notes file (in the code window)                      |
 | `<Tab>` | fold or unfold a section                                      |
-| `g?`    | help                                                          |
+| `?`     | every key, to read or run (`g?` too)                          |
 
 ### Thread mode
 
@@ -188,20 +209,20 @@ why not reuse the helper?
 it needs the stage, the helper takes a layer
 ```
 
-The winbar shows the place in the list and the keys:
-`3/19  2 unread   r reply  x resolve  a approve  d discard  - list`.
+The winbar shows the place in the list and the keys that apply:
+`3/19  2 unread   r reply  x resolve  a approve  ]t next  - list  ? keys`.
 
 - Showing a thread marks it seen; `R` in the list stays for clearing many
   at once.
 - `-` (or `<BS>`) goes back to list mode, the cursor on that thread's row.
 - `]t`/`[t` and `]u`/`[u` move through the threads in list order (the order
   is kept while moving, so a thread that changes section is not skipped or
-  repeated), and the list's cursor follows.
+  repeated), and the list's cursor follows. In list mode `j`/`k` do that.
 
 ### Thread keys
 
 The same in both modes; in list mode they act on the thread under the
-cursor.
+cursor. Moving (`]t`, `]u`, `-`) is thread mode's.
 
 | key  | action                                                       |
 | ---- | ------------------------------------------------------------ |
@@ -210,9 +231,8 @@ cursor.
 | `a`  | approve the proposed comment                                 |
 | `d`  | discard my unpublished text (a new thread disappears)        |
 | `o`  | go to the code                                               |
-| `]t` | next thread, `[t` previous (list order)                      |
-| `]u` | next unread, `[u` previous                                   |
 | `q`  | close the sidebar                                            |
+| `?`  | every key, to read or run                                    |
 
 `x`, `a`, `d` act at once (they are local until publish); `d` asks when it
 would delete a whole new thread.
@@ -252,7 +272,7 @@ Global keys the README suggests (the plugin sets none):
 
 | key          | action                                                   |
 | ------------ | -------------------------------------------------------- |
-| `<leader>rr` | the sidebar (toggle)                                     |
+| `<leader>rr` | the sidebar: open, back to the list, close               |
 | `<leader>rt` | the thread at the cursor in the sidebar (a menu if several) |
 | `<leader>rn` | new thread on the line, or the visual range              |
 | `<leader>rN` | new thread on the whole change                           |
@@ -266,7 +286,7 @@ replies are `r` in the sidebar.
 
 | Command           | Effect                                               |
 | ----------------- | ---------------------------------------------------- |
-| `:Review`         | the sidebar (toggle)                                 |
+| `:Review`         | the sidebar: open, back to the list, close           |
 | `:Review thread`  | the thread at the cursor in the sidebar              |
 | `:Review pull`    | pull, for scripts and autocmds                       |
 | `:Review publish` | publish (summary, confirm)                           |
@@ -386,6 +406,7 @@ The git-lab script in `extras/` implements it for GitLab.
 | `sync.lua`        | pull and publish                                           |
 | `actions.lua`     | the verbs, on items: resolve, approve, discard, reply, ... |
 | `sidebar.lua`     | the sidebar window and the code window                     |
+| `keys.lua`        | key declarations: mappings, hint bar, `?` menu             |
 | `list.lua`        | list mode: drawing, folds, review-wide keys, MR hooks      |
 | `thread.lua`      | thread mode: drawing, winbar, thread keys, list order      |
 | `signs.lua`       | anchors (extmarks) and signs in code buffers               |

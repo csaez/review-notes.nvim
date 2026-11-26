@@ -195,7 +195,8 @@ function M.next(dir)
 end
 
 --- The sidebar with the list of the current review: every thread, the
---- review-wide actions. Closes it when the cursor is in it.
+--- review-wide actions. One level at a time: from a thread in the sidebar,
+--- back to the list; from the list, closes it.
 function M.toggle() list_mode.toggle() end
 
 --- Open the sidebar on the list of the current review, and go there.

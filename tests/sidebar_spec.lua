@@ -143,6 +143,12 @@ describe("sidebar, thread mode", function()
     thread.show(ctx, "t1")
     local _, w = panel_lines()
     assert.truthy(vim.wo[w].winbar:find("1/3", 1, true))
+    -- Only what applies: t1 has no proposed comment and no text of mine.
+    assert.is_nil(vim.wo[w].winbar:find("approve", 1, true))
+    assert.is_nil(vim.wo[w].winbar:find("discard", 1, true))
+    thread.show(ctx, "new:a.c:4#1")
+    assert.truthy(vim.wo[w].winbar:find("a approve", 1, true))
+    assert.truthy(vim.wo[w].winbar:find("d discard", 1, true))
   end)
 
   it("items search the whole conversation, for the finder", function()
