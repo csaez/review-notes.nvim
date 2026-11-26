@@ -22,7 +22,7 @@ file, scripts and coding agents can read and answer them too.
 ```
 
 `<CR>` on a row turns the sidebar into the thread, with its code on the left;
-`-` goes back to the list.
+`q` goes back to the list, and `q` there closes the sidebar.
 
 ## Features
 
@@ -95,8 +95,8 @@ apply in its bottom bar, and `?` lists them all.
 2. `<leader>rr` opens the sidebar on the list, which pulls the threads of the
    merge request (`p` pulls again any time).
 3. `<CR>` on a thread shows it in the sidebar, with its code in the window on
-   the left. `r` replies, `x` resolves, `]t` moves to the next one, `-` goes
-   back to the list.
+   the left. `r` replies, `x` resolves, `]t` moves to the next one, `q` goes
+   back to the list, and `q` there closes the sidebar.
 4. In the code, `<leader>rn` on a line (or a visual selection) starts a new
    thread: write, save with `<C-s>`.
 5. Back in the list, `P` shows what will be sent and, once you confirm, sends it.
@@ -156,8 +156,7 @@ here. The bottom bar shows where you are in the list (`2 unread  3 of 19`).
 | `]t` `[t`  | next / previous thread (the list's order)             |
 | `]u` `[u`  | next / previous unread                                |
 | `o`        | go to the code                                        |
-| `-`, `<BS>`| back to the list, on this thread                      |
-| `q`        | close the sidebar                                     |
+| `q`        | back to the list, on this thread (`q` there closes the sidebar) |
 | `?`        | every key, to read or run (see below)                 |
 
 ### Finding the keys

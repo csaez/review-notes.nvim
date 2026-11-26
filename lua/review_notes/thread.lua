@@ -151,9 +151,8 @@ KEYS = {
   { lhs = "[t", group = "Move", desc = "previous thread", fn = function() step(-1) end },
   { lhs = "]u", group = "Move", desc = "next unread", fn = function() step(1, true) end },
   { lhs = "[u", group = "Move", desc = "previous unread", fn = function() step(-1, true) end },
-  { lhs = "-", group = "Move", desc = "back to the list, on this thread", hint = "list", fn = back_to_list },
-  { lhs = "<BS>", group = "Move", desc = "back to the list, on this thread", fn = back_to_list },
-  { lhs = "q", group = "Move", desc = "close the sidebar", fn = function() sidebar.close() end },
+  -- The list is home: q steps back to it, and q there closes the sidebar.
+  { lhs = "q", group = "Move", desc = "back to the list, on this thread", hint = "list", fn = back_to_list },
 }
 
 ---@return integer

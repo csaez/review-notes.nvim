@@ -219,11 +219,12 @@ it needs the stage, the helper takes a layer
 ```
 
 The hint bar shows the keys that apply, and the place in the list on the
-right: `r reply  x resolve  a approve  ]t next  - list  ? keys    2 unread  3 of 19`.
+right: `r reply  x resolve  a approve  ]t next  q list  ? keys    2 unread  3 of 19`.
 
 - Showing a thread marks it seen; `R` in the list stays for clearing many
   at once.
-- `-` (or `<BS>`) goes back to list mode, the cursor on that thread's row.
+- `q` goes back to list mode, the cursor on that thread's row. The list is
+  home: `q` there closes the sidebar.
 - `]t`/`[t` and `]u`/`[u` move through the threads in list order (the order
   is kept while moving, so a thread that changes section is not skipped or
   repeated), and the list's cursor follows. In list mode `j`/`k` do that.
@@ -231,7 +232,8 @@ right: `r reply  x resolve  a approve  ]t next  - list  ? keys    2 unread  3 of
 ### Thread keys
 
 The same in both modes; in list mode they act on the thread under the
-cursor. Moving (`]t`, `]u`, `-`) is thread mode's.
+cursor. Moving (`]t`, `]u`) is thread mode's; `q` steps back one level
+(thread to list, list to closed).
 
 | key  | action                                                       |
 | ---- | ------------------------------------------------------------ |
@@ -240,7 +242,7 @@ cursor. Moving (`]t`, `]u`, `-`) is thread mode's.
 | `a`  | approve the proposed comment                                 |
 | `d`  | discard my unpublished text (a new thread disappears)        |
 | `o`  | go to the code                                               |
-| `q`  | close the sidebar                                            |
+| `q`  | back one level: thread to list, list closes the sidebar      |
 | `?`  | every key, to read or run                                    |
 
 `x`, `a`, `d` act at once (they are local until publish); `d` asks when it
