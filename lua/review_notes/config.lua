@@ -6,7 +6,7 @@ local M = {}
 ---@field signs boolean sign column marks on the anchors
 ---@field watch boolean redraw when a notes file changes on disk
 ---@field auto_pull integer|false pull in the background on focus and on
----  entering the home, when the last pull is older than this many seconds
+---  entering the list, when the last pull is older than this many seconds
 ---@field backend table<string, string[]> Command lines, run in the repo root.
 ---  `{path}`, `{line}`, `{thread}` and `{ids}` are substituted; text goes on stdin.
 ---    threads    prints [{id, path, line, resolved, comments = [{id, author, body}]}]
@@ -23,21 +23,21 @@ local M = {}
 ---               comma-separated ids they printed, so drafts queued elsewhere
 ---               stay pending; may print {published = [ids]}, also on failure
 ---    discard    optional: drops the queued {ids} that submit did not publish
----@field mr review_notes.MrConfig? the merge request in the home; nil or false: none
----@field files fun(review: review_notes.HomeInfo)? `f` in the home: the changed files
+---@field mr review_notes.MrConfig? the merge request in the list; nil or false: none
+---@field files fun(review: review_notes.ListInfo)? `f` in the list: the changed files
 
 ---@class review_notes.MrConfig
 ---@field info string[]? prints {ref, title, url, target, source, author} as JSON
----@field actions review_notes.MrAction[]? under `m` in the home
+---@field actions review_notes.MrAction[]? under `m` in the list
 
 ---@class review_notes.MrAction
 ---@field key string
 ---@field desc string
 ---@field cmd string[]? run in the repo root; `{input}` asks for a line first,
 ---  `{url}`, `{ref}`, `{target}` come from `info`
----@field fn fun(mr: table, review: review_notes.HomeInfo)? instead of cmd
+---@field fn fun(mr: table, review: review_notes.ListInfo)? instead of cmd
 
----@class review_notes.HomeInfo
+---@class review_notes.ListInfo
 ---@field ctx review_notes.Context
 ---@field mr table? what `mr.info` printed
 

@@ -1,7 +1,7 @@
 -- The verbs on threads, in one place: every UI (the code buffer keys, the
--- picker, the home and the thread panel) calls these. A thread is named by
--- its review and key; the change is local until `publish`. The `*_items`
--- variants take picker / home items and tell when there is nothing to do.
+-- finder, the sidebar) calls these. A thread is named by its review and key;
+-- the change is local until `publish`. The `*_items`
+-- variants take finder / list items and tell when there is nothing to do.
 local store = require("review_notes.store")
 local merge = require("review_notes.merge")
 local review = require("review_notes.review")
@@ -206,7 +206,7 @@ end
 --- Reply to a thread, or edit my reply not published yet.
 ---@param ctx review_notes.Context
 ---@param entry review_notes.Entry
----@param win integer? open the composer inside this window (the panel)
+---@param win integer? open the composer inside this window (the sidebar)
 function M.reply(ctx, entry, win)
   open_composer(ctx, { key = entry.key }, "reply to " .. store.anchor_string(entry.thread.anchor), entry.thread, win)
 end

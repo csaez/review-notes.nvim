@@ -201,10 +201,13 @@ function M.toggle() list_mode.toggle() end
 --- Open the sidebar on the list of the current review, and go there.
 function M.open() list_mode.open() end
 
---- Open the notes file, to edit by hand.
+--- Open the notes file, to edit by hand (in the code window when called
+--- from the sidebar).
 function M.edit()
   local ctx = current_review(vim.api.nvim_get_current_buf())
-  if ctx then vim.cmd("edit " .. vim.fn.fnameescape(ctx.path)) end
+  if not ctx then return end
+  if sidebar.win() == vim.api.nvim_get_current_win() then return sidebar.edit(ctx.path) end
+  vim.cmd("edit " .. vim.fn.fnameescape(ctx.path))
 end
 
 -- Items (for pickers) -----------------------------------------------------

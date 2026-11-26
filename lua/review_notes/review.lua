@@ -83,13 +83,13 @@ end
 
 local bound = {} ---@type table<integer, review_notes.Context>
 
---- Tie *buf* (a plugin buffer: the home) to *ctx*, or untie it with nil.
+--- Tie *buf* (a plugin buffer: the list) to *ctx*, or untie it with nil.
 ---@param buf integer
 ---@param ctx review_notes.Context?
 function M.bind(buf, ctx) bound[buf] = ctx end
 
 --- The review a buffer belongs to: a file in a git worktree is in its
---- branch's review, any other file has its own, next to it. The home has its
+--- branch's review, any other file has its own, next to it. The list has its
 --- own; other buffers that are not files (pickers) belong to the cwd's repo.
 ---@param buf integer? defaults to the current buffer
 ---@param memo table?
