@@ -137,6 +137,197 @@ describe("pull and publish", function()
     assert.are.same({}, read(notes_path))
   end)
 
+  it("an offline remote shows as offline, and keeps retrying", function()
+    local sync = require("review_notes.sync")
+    local ctx = require("review_notes.review").context()
+    review.config.backend.threads = cmd("offline")
+    review.config.auto_pull = 0
+    local notify = vim.notify
+    vim.notify = function() end
+    sync.auto_pull(ctx)
+    wait_for(function() return sync.state(ctx).failing end, "first attempt")
+    assert.are.equal("offline", sync.state(ctx).kind)
+    assert.is_falsy(sync.state(ctx).paused)
+    sync.auto_pull(ctx)
+    wait_for(function() return #calls() == 2 end, "retry")
+    vim.notify = notify
+  end)
+
+  it("a backend that hangs is stopped after `timeout` seconds and counts as offline", function()
+    local sync = require("review_notes.sync")
+    local ctx = require("review_notes.review").context()
+    review.config.backend.threads = cmd("slow")
+    review.config.timeout = 1
+    local notify, msgs = vim.notify, {}
+    vim.notify = function(m) table.insert(msgs, m) end
+    review.pull()
+    wait_for(function() return sync.state(ctx).failing end, "timeout")
+    vim.notify = notify
+    review.config.timeout = 30
+    assert.are.equal("offline", sync.state(ctx).kind)
+    assert.truthy(table.concat(msgs, "\n"):find("timed out"))
+  end)
+
+  it("no MR pauses automatic pulls until a manual pull", function()
+    local sync = require("review_notes.sync")
+    local ctx = require("review_notes.review").context()
+    review.config.backend.threads = cmd("nomr")
+    review.config.auto_pull = 0
+    local notify, msgs = vim.notify, {}
+    vim.notify = function(m) table.insert(msgs, m) end
+    sync.auto_pull(ctx)
+    wait_for(function() return sync.state(ctx).failing end, "first attempt")
+    assert.is_true(sync.state(ctx).paused)
+    assert.truthy(table.concat(msgs, "\n"):find("!7 was merged"))
+    sync.auto_pull(ctx)
+    vim.wait(300)
+    assert.are.equal(1, #calls())
+    review.pull()
+    wait_for(function() return #calls() == 2 end, "manual pull")
+    vim.notify = notify
+  end)
+
+  describe("with the MR in the thread list", function()
+    local mr_file
+    local function write_mr(mr, iid)
+      vim.fn.writefile({ vim.json.encode(mr) }, mr_file .. (iid and ("." .. iid) or ""))
+    end
+    before_each(function()
+      mr_file = repo .. "/mr.json"
+      vim.env.FAKE_MR = mr_file
+      review.config.backend.threads = cmd("threads-mr", "--mr={mr}")
+      review.config.backend.add = cmd("add", "--mr={mr}", "{path}:{line}", "-")
+    end)
+
+    it("records the MR, then addresses it by IID", function()
+      write_mr({ iid = 12, ref = "!12", state = "opened" })
+      review.pull()
+      wait_for(function() return #read(notes_path) > 0 or #calls() > 0 end, "pull")
+      wait_for(function() return require("review_notes.sync").state(require("review_notes.review").context()).mr end, "mr")
+      local side = store.read_sidecar(store.sidecar_path(notes_path))
+      assert.are.equal(12, side.mr.iid)
+      review.pull()
+      wait_for(function() return #calls() == 2 end, "second pull")
+      assert.are.same({ "threads-mr", "threads-mr --mr=12" }, calls())
+    end)
+
+    it("a merged MR stops automatic pulls but still pulls and publishes, after a warning", function()
+      local sync = require("review_notes.sync")
+      local ctx = require("review_notes.review").context()
+      write_mr({ iid = 12, ref = "!12", state = "merged" })
+      local prompts = {}
+      vim.ui.select = function(items, o, cb) table.insert(prompts, o.prompt) cb(items[1]) end
+      local notify, msgs = vim.notify, {}
+      vim.notify = function(m) table.insert(msgs, m) end
+      review.pull()
+      wait_for(function() return sync.state(ctx).paused end, "pull")
+      assert.truthy(table.concat(msgs, "\n"):find("!12 is merged"))
+      review.config.auto_pull = 0
+      sync.auto_pull(ctx)
+      vim.wait(300)
+      assert.are.equal(1, #calls())
+      store.update(notes_path, function(d)
+        table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "local", body = "late" } } })
+      end)
+      review.publish()
+      wait_for(function() return table.concat(calls(), "\n"):find("submit") ~= nil end, "publish")
+      vim.notify = notify
+      assert.truthy(prompts[1]:find("!12 is merged"))
+      assert.truthy(table.concat(calls(), "\n"):find("add %-%-mr=12 a.c:1"))
+    end)
+
+    it("asks before moving to the branch's new MR, and says what happens to the threads", function()
+      local sync = require("review_notes.sync")
+      local ctx = require("review_notes.review").context()
+      write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
+      write_mr({ iid = 12, ref = "!12", state = "opened" })
+      review.pull()
+      wait_for(function() return #doc().threads == 1 end, "first pull")
+      store.update(notes_path, function(d) table.insert(d.threads[1].comments, { source = "local", body = "mine" }) end)
+      -- !12 closed; the branch has !13 now, which has none of its threads.
+      write_mr({ iid = 12, ref = "!12", state = "closed", successor = { iid = 13, ref = "!13", state = "opened" } }, 12)
+      write_mr({ iid = 13, ref = "!13", state = "opened" }, 13)
+      local prompt
+      vim.ui.select = function(items, o, cb)
+        prompt = o.prompt
+        -- What !13 serves: none of the threads of !12.
+        write_threads({})
+        cb(items[1])
+      end
+      review.pull()
+      wait_for(function() return #calls() == 3 and not sync.state(ctx).running end, "pull of the new MR")
+      assert.are.equal(13, sync.state(ctx).mr.iid)
+      assert.truthy(prompt:find("new MR !13"))
+      assert.truthy(prompt:find("publish as new threads on !13"))
+      assert.are.equal("threads-mr --mr=13", calls()[3])
+      wait_for(function() return doc().threads[1].orphan == true end, "orphan")
+    end)
+
+    it("a peer approving while I review is said once, in the list and before publish", function()
+      local sync = require("review_notes.sync")
+      local ctx = require("review_notes.review").context()
+      local mr = { iid = 12, ref = "!12", state = "opened", me = "me", reviewers = { "me" }, approved_by = {}, approvals_left = 1 }
+      write_mr(mr)
+      local notify, warns = vim.notify, {}
+      vim.notify = function(m, l) if l == vim.log.levels.WARN then table.insert(warns, m) end end
+      review.pull()
+      wait_for(function() return sync.state(ctx).mr and not sync.state(ctx).running end, "pull")
+      require("review_notes.list").open(ctx)
+      local function header() return table.concat(vim.api.nvim_buf_get_lines(0, 0, 6, false), "\n") end
+      assert.truthy(header():find("1 approval left  reviewer: me", 1, true))
+      -- bo approves meanwhile.
+      mr.approved_by, mr.approvals_left, mr.reviewers = { "bo" }, 0, { "me", "bo" }
+      write_mr(mr)
+      review.pull()
+      wait_for(function() return #warns == 1 end, "warning")
+      assert.truthy(warns[1]:find("MR !12 approved by @bo", 1, true))
+      wait_for(function() return header():find("approved by @bo", 1, true) ~= nil end, "header")
+      assert.truthy(header():find("reviewers: me, @bo", 1, true))
+      review.pull()
+      wait_for(function() return #calls() == 3 and not sync.state(ctx).running end, "third pull")
+      assert.are.equal(1, #warns)
+      store.update(notes_path, function(d)
+        table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "local", body = "x" } } })
+      end)
+      local prompt
+      vim.ui.select = function(items, o, cb) prompt = o.prompt cb(items[#items]) end
+      review.publish()
+      wait_for(function() return prompt ~= nil end, "confirm")
+      vim.notify = notify
+      require("review_notes.sidebar").close()
+      assert.truthy(prompt:find("MR !12 is already approved by @bo", 1, true))
+    end)
+
+    it("warns on the first pull of an MR approved before I came, not about my own approval", function()
+      local sync = require("review_notes.sync")
+      local ctx = require("review_notes.review").context()
+      write_mr({ iid = 12, ref = "!12", state = "opened", me = "me", reviewers = {}, approved_by = { "me", "al" } })
+      local notify, warns = vim.notify, {}
+      vim.notify = function(m, l) if l == vim.log.levels.WARN then table.insert(warns, m) end end
+      review.pull()
+      wait_for(function() return sync.state(ctx).mr and not sync.state(ctx).running end, "pull")
+      vim.notify = notify
+      assert.are.same({ "MR !12 approved by @al" }, warns)
+    end)
+
+    it("staying on the old MR is remembered for the session", function()
+      local sync = require("review_notes.sync")
+      local ctx = require("review_notes.review").context()
+      write_mr({ iid = 12, ref = "!12", state = "closed", successor = { iid = 13, ref = "!13" } })
+      local asked = 0
+      vim.ui.select = function(items, _, cb) asked = asked + 1 cb(items[2]) end
+      local notify = vim.notify
+      vim.notify = function() end
+      review.pull()
+      wait_for(function() return #calls() == 1 and not sync.state(ctx).running end, "pull")
+      review.pull()
+      wait_for(function() return #calls() == 2 and not sync.state(ctx).running end, "second pull")
+      vim.notify = notify
+      assert.are.equal(1, asked)
+      assert.are.equal(12, sync.state(ctx).mr.iid)
+    end)
+  end)
+
   it("publish sends new threads, replies and resolves, once, then pulls", function()
     write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
     review.pull()
@@ -187,6 +378,19 @@ describe("pull and publish", function()
     review.publish()
     wait_for(function() return table.concat(calls(), "\n"):find("discard d1") ~= nil end, "discard")
     assert.are.equal("local", doc().threads[1].comments[1].source)
+  end)
+
+  it("says which drafts may be left on the remote when the cleanup fails too", function()
+    vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
+    vim.fn.writefile({ "## a.c:1", "status: open", "", "### me (local)", "mine" }, notes_path)
+    review.config.backend.submit = cmd("offline", "{ids}")
+    review.config.backend.discard = cmd("offline", "{ids}")
+    local notify, msgs = vim.notify, {}
+    vim.notify = function(m) table.insert(msgs, m) end
+    review.publish()
+    wait_for(function() return table.concat(msgs, "\n"):find("published with problems") ~= nil end, "report")
+    vim.notify = notify
+    assert.truthy(table.concat(msgs, "\n"):find("pending on the remote, unpublished: d1"))
   end)
 end)
 

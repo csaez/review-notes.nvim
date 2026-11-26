@@ -227,7 +227,29 @@ have not published.
   and you can skip those. Unread never blocks anything else. With a backend
   that has `submit` (git-lab does) everything is queued as drafts and
   published together, only the drafts created here; if publishing fails the
-  leftovers are deleted, so retrying cannot post twice.
+  leftovers are deleted, so retrying cannot post twice. If deleting them
+  fails too (the connection dropped), the report lists the drafts that may
+  still be pending on GitLab.
+- **Offline or no VPN.** Pulls fail quietly: one warning, then the list and
+  the statusline say `offline since HH:MM` and when the last pull worked.
+  Automatic pulls keep retrying every `auto_pull` seconds; a hung request is
+  stopped after `timeout` seconds. Publish pulls first, so it sends nothing
+  while offline. Your notes are never touched by a failed pull.
+- **No access, no MR.** A pull that fails because the token has no access or
+  the branch has no MR pauses automatic pulls (retrying cannot help); `p`
+  checks again.
+- **Approvals and reviewers.** The list's header says who reviews the MR and
+  who approved it (`approved by @bo  reviewers: me, @bo`), refreshed by
+  every pull, so a peer approving while you review shows up within
+  `auto_pull` seconds, with one warning. Publish's confirm says so too, so
+  you can decide whether your comments still matter. `m r` assigns you as
+  reviewer, unless someone else reviews it already (`m R` joins anyway).
+- **Merged or closed MR.** A review remembers its MR (in the sidecar) and
+  keeps pulling and publishing to it by IID after it is merged or closed. The
+  list shows `!123 [merged]`, automatic pulls stop, and publish says the MR is
+  merged before it sends. If the branch has a new MR, a manual pull asks
+  whether to move the review to it, and says which threads leave the notes
+  (they stay on the old MR) and which of yours publish as new threads.
 - **Proposed** comments are not sent, and neither is the resolve of a thread
   while it has one, so approving takes a single step.
 - **Line numbers.** Anchors keep the lines you see, which follow your edits.
@@ -288,26 +310,33 @@ require("review_notes").setup({
   -- pull is older than this many seconds; quiet unless threads came in.
   -- false: only `p` / `:Review pull`.
   auto_pull = 60,
+  -- A backend command still running after this many seconds is stopped and
+  -- counts as offline. false: no limit.
+  timeout = 30,
   -- Command lines run in the repository root. {path}, {line}, {thread} and
-  -- {ids} are filled in. Text goes on stdin; structured output comes back as
-  -- JSON on stdout.
+  -- {ids} are filled in, and {mr}: the IID of the review's MR (an argument
+  -- holding it is left out until the first pull reports it). Text goes on
+  -- stdin; structured output comes back as JSON on stdout.
   backend = {
-    threads   = { "git-lab", "comment", "list", "--json" },
-    add       = { "git-lab", "comment", "add", "--draft", "--json", "{path}:{line}", "-" },
-    general   = { "git-lab", "comment", "add", "--draft", "--json", "-" },
-    reply     = { "git-lab", "comment", "reply", "--draft", "--json", "{thread}", "-" },
-    resolve   = { "git-lab", "comment", "resolve", "{thread}" },
-    unresolve = { "git-lab", "comment", "unresolve", "{thread}" },
-    submit    = { "git-lab", "review", "submit", "--only", "{ids}", "--json" },
-    discard   = { "git-lab", "review", "discard", "--only", "{ids}" },
+    threads   = { "git-lab", "comment", "list", "--with-mr", "--mr={mr}" },
+    add       = { "git-lab", "comment", "add", "--mr={mr}", "--draft", "--json", "{path}:{line}", "-" },
+    general   = { "git-lab", "comment", "add", "--mr={mr}", "--draft", "--json", "-" },
+    reply     = { "git-lab", "comment", "reply", "--mr={mr}", "--draft", "--json", "{thread}", "-" },
+    resolve   = { "git-lab", "comment", "resolve", "--mr={mr}", "{thread}" },
+    unresolve = { "git-lab", "comment", "unresolve", "--mr={mr}", "{thread}" },
+    submit    = { "git-lab", "review", "submit", "--mr={mr}", "--only", "{ids}", "--json" },
+    discard   = { "git-lab", "review", "discard", "--mr={mr}", "--only", "{ids}" },
   },
   -- The merge request in the list (false: none). `info` prints JSON with
-  -- ref, title, url, target; `actions` are under `m`. A `cmd` runs in the
+  -- ref, title, url, target, and optionally state, me, reviewers,
+  -- approved_by, approvals_left; `actions` are under `m`. A `cmd` runs in the
   -- repository root with {url}, {ref}, {target} filled in from `info`, and
   -- {input} asked for first (left out with the option before it if empty).
   mr = {
-    info = { "git-lab", "mr", "info", "--json" },
+    info = { "git-lab", "mr", "info", "--json", "!{mr}" },
     actions = {
+      { key = "r", desc = "review it: assign me, unless someone else reviews it", cmd = { "git-lab", "mr", "review-assign", "--if-free", "{ref}" } },
+      { key = "R", desc = "review it with the others: assign me anyway", cmd = { "git-lab", "mr", "review-assign", "{ref}" } },
       { key = "a", desc = "approve the MR (optional comment)", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
       { key = "o", desc = "open in the browser", fn = function(mr) vim.ui.open(mr.url) end },
     },
@@ -323,7 +352,7 @@ require("review_notes").setup({
 
 | Operation              | Input                          | Output on stdout                     |
 | ---------------------- | ------------------------------ | ------------------------------------ |
-| `threads`              |                                | JSON list of threads (see below)     |
+| `threads`              | `{mr}`                         | JSON list of threads (see below), or `{"mr": ..., "threads": [...]}` |
 | `add`                  | `{path}`, `{line}`, text on stdin | `{"id": ...}`                     |
 | `general`              | text on stdin                  | `{"id": ...}`                        |
 | `reply`                | `{thread}`, text on stdin      | `{"id": ...}`                        |
@@ -350,6 +379,16 @@ require("review_notes").setup({
   the thread as unread. `mine` keeps your own comments from counting as
   unread. `start_line`, `resolved_by` and `resolved_by_me` are optional.
 - Without `submit`, each comment is published as soon as it is sent.
+- `threads` may wrap the list with the MR it belongs to:
+  `{"mr": {"iid": 12, "ref": "!12", "state": "merged", "successor": {"iid": 13, "ref": "!13"}}, "threads": [...]}`.
+  The review records it and passes `{mr}` from then on; `state` `merged` or
+  `closed` stops automatic pulls, and `successor` (the branch's new MR)
+  offers to move the review there. `me`, `reviewers`, `approved_by` and
+  `approvals_left` (all optional) feed the header's review line and the
+  "approved by a peer" warnings.
+- Exit status says why a command failed: 3 the remote is unreachable, 4 no
+  access, 5 no such MR; anything else is an error. A command stopped by
+  `timeout` counts as unreachable.
 
 ## Finder
 
@@ -413,19 +452,24 @@ own:
 
 ```sh
 git-lab mr list                  # open MRs of this repository
+git-lab mr list --approvals      # ... with who approved and who reviews
+git-lab mr review-assign --if-free   # review the current MR, unless someone else does
 git-lab mr checkout '!123'       # check out an MR (also group/project!123, URL)
 git-lab mr target                # the target branch of the current MR (cached)
 git-lab mr target --refresh      # ask GitLab again, updating the cache
 git-lab mr approve -m "LGTM"
-git-lab mr info --json           # the current MR: ref, title, url, target
+git-lab mr info --json           # the current MR (or its last merged or closed one)
 git-lab comment list             # threads, with lines mapped to the files on disk
+git-lab comment list --with-mr   # {mr, threads}: the MR's state too
 git-lab comment add src/a.c:12 "why?"
 git-lab review submit            # publish pending draft comments
 ```
 
 It finds the project from the `origin` remote and the merge request from the
-current branch. Set `GITLAB_HOST` to override the host. Run `git-lab --help`
-for everything.
+current branch. Set `GITLAB_HOST` to override the host and `GITLAB_TIMEOUT`
+for the seconds per request (default 10). It exits 3 when GitLab is
+unreachable, 4 without access, 5 when there is no such MR. Run
+`git-lab --help` for everything.
 
 `mr list` prints one MR per line, starting with its reference, so a picker
 works as a one-liner (`--recursive` includes submodules):

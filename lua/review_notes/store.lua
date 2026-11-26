@@ -330,8 +330,20 @@ end
 ---@field seen table<string, boolean> remote comment ids I have seen
 ---@field seen_status boolean whether I have seen who resolved it
 
+---@class review_notes.MrRecord
+---@field iid integer|string
+---@field ref string?
+---@field state string? "opened", "merged", "closed"
+---@field url string?
+---@field me string? my user name on the remote
+---@field reviewers string[]? who is assigned to review it
+---@field approved boolean? enough approvals to merge
+---@field approved_by string[]? who approved it
+---@field approvals_left integer?
+
 ---@class review_notes.Sidecar
 ---@field threads table<string, review_notes.ThreadState>
+---@field mr review_notes.MrRecord? the merge request the review is on
 
 --- The sidecar next to a notes file: `x.md` gives `x.json`.
 ---@param notes_path string

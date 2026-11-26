@@ -30,6 +30,7 @@ local SECTIONS = {
 ---@field rows table<integer, review_notes.Item> thread by buffer line
 ---@field mr table? what `mr.info` printed
 ---@field mr_error string?
+---@field mr_for string? the `{mr}` the info was loaded for
 ---@field folded table<string, boolean> by section state
 ---@field want string|true|nil the next draw puts the cursor on this thread
 ---  (true: the first one)
@@ -47,11 +48,64 @@ local function branch_of(ctx)
 end
 
 local function ago(t)
-  if not t then return "not pulled this session" end
   local s = os.time() - t
-  if s < 60 then return "pulled just now" end
-  if s < 3600 then return ("pulled %d min ago"):format(math.floor(s / 60)) end
-  return ("pulled %d h ago"):format(math.floor(s / 3600))
+  if s < 60 then return "just now" end
+  if s < 3600 then return ("%d min ago"):format(math.floor(s / 60)) end
+  return ("%d h ago"):format(math.floor(s / 3600))
+end
+
+--- The sync line: when it last worked, and why it fails now.
+---@return string text, string hl
+local function sync_line(ctx)
+  local s = sync.state(ctx)
+  local at = sync.pulled_at[ctx.path]
+  local last = at and ("pulled " .. ago(at)) or "not pulled this session"
+  if s.running then return "pulling...  (" .. last .. ")", "Comment" end
+  if s.failing then
+    local why = ({
+      offline = "offline since " .. os.date("%H:%M", s.since),
+      no_access = "no access to the MR",
+      no_mr = "no merge request",
+    })[s.kind] or "pull failing"
+    local paused = s.paused and ", automatic pulls paused" or ""
+    return ("%s%s  (%s)"):format(why, paused, last), "DiagnosticWarn"
+  end
+  if sync.ended(s.mr) then return last .. ", automatic pulls stopped", "Comment" end
+  return last, "Comment"
+end
+
+local function at(users)
+  return table.concat(vim.tbl_map(function(u) return "@" .. u end, users), ", ")
+end
+
+--- Who reviews and who approved: what to know before picking a review up.
+--- From the last pull when it has them (approvals change while I review),
+--- else from `mr.info`.
+---@return string? text, string hl
+local function review_line(h)
+  local pulled = sync.state(h.ctx).mr
+  local mr = pulled and pulled.reviewers and pulled or h.mr
+  if not (mr and (mr.reviewers or mr.approved_by)) then return nil, "" end
+  local me = mr.me
+  local parts, hl = {}, "Comment"
+  local peers = vim.tbl_filter(function(u) return u ~= me end, mr.approved_by or {})
+  local mine = me and vim.tbl_contains(mr.approved_by or {}, me)
+  if #peers > 0 then
+    table.insert(parts, "approved by " .. at(peers))
+    hl = "DiagnosticWarn"
+  elseif mr.approvals_left and mr.approvals_left > 0 then
+    table.insert(parts, ("%d approval%s left"):format(mr.approvals_left, mr.approvals_left == 1 and "" or "s"))
+  end
+  if mine then table.insert(parts, "approved by me") end
+  local reviewers = mr.reviewers or {}
+  if #reviewers == 0 then
+    table.insert(parts, "no reviewer")
+  else
+    local others = vim.tbl_filter(function(u) return u ~= me end, reviewers)
+    local list = vim.tbl_contains(reviewers, me) and (#others > 0 and ("me, " .. at(others)) or "me") or at(others)
+    table.insert(parts, "reviewer" .. (#reviewers == 1 and "" or "s") .. ": " .. list)
+  end
+  return table.concat(parts, "  "), hl
 end
 
 -- Drawing ---------------------------------------------------------------------
@@ -86,15 +140,22 @@ local function draw(buf)
   add("Review  " .. branch_of(h.ctx), { { 0, 6, "Title" } })
   if h.mr and h.mr.ref then
     local target = h.mr.target and (" -> " .. h.mr.target:gsub("^origin/", "")) or ""
-    add(h.mr.ref .. target .. (h.mr.title and ("  " .. h.mr.title) or ""), { { #h.mr.ref + #target, -1, "Comment" } })
+    local head = h.mr.ref .. target
+    local state = sync.ended(h.mr) and ("  [" .. h.mr.state .. "]") or ""
+    local chunks = { { #head, -1, "Comment" } }
+    if state ~= "" then chunks = { { #head, #head + #state, "DiagnosticWarn" }, { #head + #state, -1, "Comment" } } end
+    add(head .. state .. (h.mr.title and ("  " .. h.mr.title) or ""), chunks)
   end
+  local review_text, review_hl = review_line(h)
+  if review_text then add(review_text, { { 0, -1, review_hl } }) end
   if h.mr_error then add("MR: " .. h.mr_error, { { 0, -1, "DiagnosticWarn" } }) end
   local parts = {}
   for _, s in ipairs(SECTIONS) do
     if (counts[s.state] or 0) > 0 then table.insert(parts, ("%d %s"):format(counts[s.state], s.title:lower())) end
   end
   add(#parts > 0 and table.concat(parts, "  ") or "no threads", { { 0, -1, "Comment" } })
-  add(ago(sync.pulled_at[h.ctx.path]), { { 0, -1, "Comment" } })
+  local sync_text, sync_hl = sync_line(h.ctx)
+  add(sync_text, { { 0, -1, sync_hl } })
   add("")
 
   -- The sidebar is narrow: anchors longer than this are cut from the left.
@@ -216,12 +277,17 @@ end
 local function load_mr(buf)
   local h = lists[buf]
   local mr = config.values.mr
+  local vars = sync.vars(h.ctx)
+  h.mr_for = vars.mr
   if not (mr and mr.info) or h.ctx.kind ~= "git" then return end
   backend.async(function()
-    local r = backend.run({ info = mr.info }, "info", { root = h.ctx.root })
+    local r = backend.run({ info = mr.info }, "info", { root = h.ctx.root, vars = vars })
     if not lists[buf] then return end
     if r.ok and type(r.json) == "table" then
       h.mr, h.mr_error = r.json, nil
+    elseif r.kind == "offline" and h.mr then
+      -- Keep what we knew; the sync line says we are offline.
+      h.mr_error = nil
     else
       h.mr, h.mr_error = nil, backend.message(r):gsub("\n.*", "")
     end
@@ -256,6 +322,8 @@ local function run_mr_action(buf, a)
       local r = backend.run({ action = argv }, "action", { root = h.ctx.root, vars = vars })
       local text = vim.trim(r.stdout .. (r.stderr ~= "" and ("\n" .. r.stderr) or ""))
       notify(text ~= "" and text or (a.desc .. (r.ok and ": done" or ": failed")), not r.ok and vim.log.levels.ERROR or nil)
+      -- Reviewers or approvals may have changed: the header shows them.
+      if r.ok and lists[buf] then sync.refresh(h.ctx) end
     end)
   end
   if vim.tbl_contains(a.cmd, "{input}") then
@@ -438,5 +506,20 @@ function M.foldtext()
 end
 
 review.on_change(redraw_all)
+-- A pull came back: redraw, and reload the MR when the review moved to
+-- another one or the info is stale (it failed, or the state changed).
+sync.on_status(function()
+  for buf, h in pairs(lists) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      local s = sync.state(h.ctx)
+      local mr = s.mr
+      local moved = sync.vars(h.ctx).mr ~= h.mr_for
+      local stale = not s.running and not s.failing and (h.mr_error
+        or (mr and h.mr and (mr.state ~= h.mr.state or not vim.deep_equal(mr.reviewers, h.mr.reviewers))))
+      if moved or stale then load_mr(buf) end
+      draw(buf)
+    end
+  end
+end)
 
 return M

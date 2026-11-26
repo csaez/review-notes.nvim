@@ -78,6 +78,19 @@ when the last pull (or failed attempt) is older than `auto_pull` seconds
 fine; it reports only new or changed threads, warns once when it starts
 failing, and waits while the notes file has unsaved edits in a buffer.
 
+Failures are told apart by the backend's exit status: unreachable (3, or a
+command stopped after `timeout` seconds), no access (4), no MR (5). Offline
+keeps retrying, quietly; no access and no MR pause automatic pulls until a
+manual one, since retrying cannot fix them. The list and the statusline say
+which, and when the last pull worked.
+
+A review is tied to its MR: `threads` may report it (`{mr, threads}`), the
+sidecar records it, and every command gets its IID as `{mr}`. So a merged or
+closed MR keeps syncing (automatic pulls stop, publish names the state in its
+confirm), and a new MR on the same branch never silently takes over: a manual
+pull asks before moving the review, saying which threads leave the notes and
+which of mine publish as new threads there.
+
 ## Safe publish
 
 Publish is always explicit.
@@ -93,7 +106,8 @@ Publish is always explicit.
 3. After confirm: create everything as remote drafts (when the backend has
    drafts), then submit exactly the ids created, which sends one
    notification. What submit did not publish is discarded, so retrying
-   cannot post twice.
+   cannot post twice; if the discard fails too, the report names the drafts
+   left pending on the remote.
 4. Resolves and reopens go after the submit (publishing a reply reopens a
    thread on GitLab).
 5. Pull again. Published local comments become remote comments.
@@ -254,10 +268,19 @@ The MR is part of the review (approving it, its target, the diff base), so
 the list is its natural place. The plugin stays forge-agnostic: the header
 line and `m` come from optional config.
 
+Whether the review is still worth doing is part of it too: who reviews the
+MR and who approved it. That changes while I review, so it rides on every
+pull (`threads`' `mr`), not only on opening the list. A peer's approval is
+said once per approver (on the first pull of an already approved MR too),
+shows in the header, and is named in publish's confirm. Picking a review up
+is `m r`: assign me, refused when someone else reviews it already, checked
+against GitLab at that moment, not against what the header last showed.
+
 ```lua
 mr = {
   info = { "git-lab", "mr", "info", "--json" }, -- {ref, title, target, url}
   actions = {
+    { key = "r", desc = "review it", cmd = { "git-lab", "mr", "review-assign", "--if-free", "{ref}" } },
     { key = "a", desc = "approve", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
     { key = "o", desc = "browser", fn = function(mr) vim.ui.open(mr.url) end },
   },

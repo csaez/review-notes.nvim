@@ -3,16 +3,21 @@
 git-lab -- GitLab merge request tooling for the current repository.
 
 Subcommands:
-    mr list [--all] [--drafts] [--recursive] [--json]
+    mr list [--all] [--drafts] [--recursive] [--json] [--approvals]
                             Print MRs as ref<TAB>author<TAB>branch<TAB>title<TAB>labels,
-                            or JSON (with the ref as _ref).
+                            or JSON (with the ref as _ref). --approvals adds
+                            who approved and who reviews (a column; _review
+                            in JSON, as in `mr info`), one request per MR.
     mr checkout REF [-r|--review]
                             Check out the MR's source branch (fork MRs as
                             mr/IID), in the submodule for a submodule's MR,
                             fast-forwarding or replaying local commits over a
                             force-push. --review: also assign yourself as
                             reviewer.
-    mr review-assign REF    Add yourself as reviewer of the MR.
+    mr review-assign [REF] [--if-free [--force]]
+                            Add yourself as reviewer of the MR (default: the
+                            current branch's). --if-free refuses when someone
+                            else reviews it already.
     mr target [REF] [--refresh]
                             Print the MR target ref (origin/<branch>) for scripting.
                             The current branch's target is cached in
@@ -21,14 +26,20 @@ Subcommands:
     mr approve [REF] [-m MSG]
                             Approve the MR of the current branch, optionally commenting.
     mr info [REF] --json    The MR of the current branch: {ref, iid, title, url,
-                            source, target, author, state, draft}.
-    comment list [--mr IID] [--json]
+                            source, target, author, state, draft, me,
+                            reviewers, approved, approved_by, approvals_left};
+                            the latest merged or closed one when none is open.
+    comment list [--mr IID] [--json] [--with-mr]
                             Threads: {id, path, line, start_line, resolved,
                             resolvable, resolved_by, resolved_by_me,
                             comments = [{author, body, mine}]}. Lines are those of the files
                             on disk (start_line: multi-line comments). Overview
                             threads (the whole MR) have path and line null;
                             line 0 is about a whole file.
+                            --with-mr prints {mr, threads}: mr as `mr info`,
+                            plus `successor` (the open MR of the branch) when
+                            this one is merged or closed. Without --mr, a
+                            merged or closed MR of the branch is listed too.
     comment add [--mr IID] [PATH:LINE] TEXT|- [--draft] [--general] [--json]
                             Start a thread; '-' reads the text from stdin.
                             No location starts an overview thread, ``PATH:0``
@@ -51,12 +62,16 @@ REF is an MR of this repository or of one of its submodules: IID, !IID,
 group/project!IID or the MR URL. Without REF (and --mr defaults to) the open
 MR of the current branch.
 
+Exit status: 1 an error, 3 GitLab unreachable (offline, timeout), 4 no
+access (401, 403), 5 no such MR (404, or no open MR for the branch).
+
 To pick an MR interactively, pipe ``mr list`` into a picker, e.g.:
     git-lab mr checkout "$(git-lab mr list --recursive | fzf | cut -f1)"
 
 Environment:
     GITLAB_TOKEN   required -- token with api scope
     GITLAB_HOST    optional -- overrides the host parsed from the git remote
+    GITLAB_TIMEOUT optional -- seconds per request (default 10)
 """
 
 import argparse
@@ -71,11 +86,41 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
+
+
+EXIT_ERROR = 1
+EXIT_UNREACHABLE = 3
+EXIT_NO_ACCESS = 4
+EXIT_NO_MR = 5
 
 
 class GitLabError(Exception):
     """Raised when a GitLab API call fails."""
+
+    def __init__(self, message: str, status: int = EXIT_ERROR):
+        super().__init__(message)
+        self.status = status
+
+
+def fail(message: str, status: int = EXIT_ERROR) -> NoReturn:
+    print(message, file=sys.stderr)
+    sys.exit(status)
+
+
+def http_status(code: int) -> int:
+    if code in (401, 403):
+        return EXIT_NO_ACCESS
+    if code == 404:
+        return EXIT_NO_MR
+    return EXIT_ERROR
+
+
+def timeout() -> float:
+    try:
+        return float(os.environ.get("GITLAB_TIMEOUT") or 10)
+    except ValueError:
+        return 10
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +215,25 @@ class Repo:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {"PRIVATE-TOKEN": self.token, "Content-Type": "application/json"}
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        # Without a timeout an unrouted host (VPN down) hangs for minutes.
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=timeout()) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:400]
-            raise GitLabError(f"HTTP {exc.code} {method} {path}: {detail}") from exc
+            raise GitLabError(
+                f"HTTP {exc.code} {method} {path}: {detail}", http_status(exc.code)
+            ) from exc
         except urllib.error.URLError as exc:
-            raise GitLabError(f"Network error reaching {url}: {exc.reason}") from exc
+            raise GitLabError(
+                f"GitLab unreachable ({self.host}): {exc.reason}", EXIT_UNREACHABLE
+            ) from exc
+        except OSError as exc:
+            # Timeouts and resets while reading are not URLErrors.
+            raise GitLabError(
+                f"GitLab unreachable ({self.host}): {exc or type(exc).__name__}",
+                EXIT_UNREACHABLE,
+            ) from exc
         return json.loads(body) if body else None
 
     def get_all(self, path: str, params: dict | None = None) -> list[dict]:
@@ -211,7 +267,7 @@ def or_exit(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except GitLabError as exc:
-        sys.exit(str(exc))
+        fail(str(exc), exc.status)
 
 
 def list_mrs(repo: Repo, state: str = "opened") -> list[dict]:
@@ -226,12 +282,27 @@ def get_mr(repo: Repo, iid: int) -> dict:
     return or_exit(repo.api, "GET", repo.mr_path(iid))
 
 
-def mrs_for_branch(repo: Repo, branch: str) -> list[dict]:
+def mrs_for_branch(repo: Repo, branch: str, state: str = "opened") -> list[dict]:
     return or_exit(
         repo.get_all,
         f"{repo.base}/merge_requests",
-        {"source_branch": branch, "state": "opened"},
+        {
+            "source_branch": branch,
+            "state": state,
+            "order_by": "updated_at",
+            "sort": "desc",
+        },
     )
+
+
+def ended_mr(repo: Repo, branch: str) -> dict | None:
+    """The most recently updated merged or closed MR of *branch*."""
+    ended = [
+        mr
+        for mr in mrs_for_branch(repo, branch, "all")
+        if mr.get("state") in ("merged", "closed")
+    ]
+    return ended[0] if ended else None
 
 
 def project_repo(repo: Repo, project: str | None) -> Repo:
@@ -266,10 +337,56 @@ def mr_ref(repo: Repo, root: Repo, iid: int) -> str:
     return f"!{iid}" if repo.project == root.project else f"{repo.project}!{iid}"
 
 
+def get_approvals(repo: Repo, iid: int) -> dict | None:
+    """The approval state of an MR, or None where GitLab has none to give."""
+    try:
+        return repo.api("GET", f"{repo.mr_path(iid)}/approvals")
+    except GitLabError as exc:
+        if exc.status == EXIT_UNREACHABLE:
+            fail(str(exc), exc.status)
+        return None
+
+
+def review_info(mr: dict, approvals: dict | None, me: str) -> dict:
+    """Who reviews *mr* and who approved it; approval fields only when known."""
+    info: dict = {
+        "me": me,
+        "reviewers": [r["username"] for r in mr.get("reviewers") or []],
+    }
+    if approvals is not None:
+        info["approved"] = bool(approvals.get("approved"))
+        info["approved_by"] = [
+            a["user"]["username"] for a in approvals.get("approved_by") or []
+        ]
+        info["approvals_left"] = approvals.get("approvals_left") or 0
+    return info
+
+
+def review_summary(info: dict) -> str:
+    """One line: who approved, or how many approvals are left; who reviews."""
+    parts = []
+    if info.get("approved_by"):
+        parts.append("approved by " + ", ".join("@" + u for u in info["approved_by"]))
+    elif info.get("approvals_left"):
+        parts.append(f"{info['approvals_left']} approval(s) left")
+    reviewers = info.get("reviewers") or []
+    parts.append(
+        "reviewers: " + ", ".join("@" + u for u in reviewers)
+        if reviewers
+        else "no reviewer"
+    )
+    return "; ".join(parts)
+
+
 def collect_mrs(
-    repo: Repo, recursive: bool, state: str = "opened", drafts: bool = False
+    repo: Repo,
+    recursive: bool,
+    state: str = "opened",
+    drafts: bool = False,
+    approvals: bool = False,
 ) -> list[dict]:
-    """MRs of *repo* (and its submodules), tagged with ``_repo`` and ``_path``."""
+    """MRs of *repo* (and its submodules), tagged with ``_repo`` and ``_path``,
+    and with ``_review`` (see ``review_info``) when *approvals*."""
     repos = [repo]
     if recursive:
         host_override = os.environ.get("GITLAB_HOST")
@@ -281,6 +398,7 @@ def collect_mrs(
         per_repo = list(pool.map(lambda r: list_mrs(r, state), repos))
     seen: set[str] = set()
     result: list[dict] = []
+    owners: list[Repo] = []
     for r, mrs in zip(repos, per_repo):
         for mr in mrs:
             url = mr.get("web_url", "")
@@ -291,24 +409,48 @@ def collect_mrs(
             mr["_path"] = r.path
             mr["_ref"] = mr_ref(r, repo, mr["iid"])
             result.append(mr)
+            owners.append(r)
+    if approvals and result:
+        # The list has no approvers: one request per MR, latency bound.
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            user_job = pool.submit(or_exit, repo.api, "GET", "/api/v4/user")
+            states = list(
+                pool.map(
+                    lambda p: get_approvals(p[0], p[1]["iid"]), zip(owners, result)
+                )
+            )
+            me = user_job.result()["username"]
+        for mr, a in zip(result, states):
+            mr["_review"] = review_info(mr, a, me)
     return result
 
 
-def resolve_mr(repo: Repo, iid: int | None, full: bool = False) -> dict:
+def resolve_mr(
+    repo: Repo, iid: int | None, full: bool = False, ended: bool = False
+) -> dict:
     """Return the MR with *iid*, or the open MR of the current branch.
 
     :param full: fetch the whole MR even when the branch lookup found it; the
         list entry lacks ``diff_refs``.
+    :param ended: with no open MR, return the branch's latest merged or
+        closed one (to read it, never to write to it unasked).
     """
     if iid is not None:
         return get_mr(repo, iid)
     branch = current_branch()
     mrs = mrs_for_branch(repo, branch)
     if not mrs:
-        sys.exit(f"No open MR for branch '{branch}' in {repo.project} (use --mr IID).")
+        last = ended_mr(repo, branch)
+        if last and ended:
+            return get_mr(repo, last["iid"]) if full else last
+        why = f": !{last['iid']} was {last['state']}" if last else ""
+        fail(
+            f"No open MR for branch '{branch}' in {repo.project}{why} (use --mr IID).",
+            EXIT_NO_MR,
+        )
     if len(mrs) > 1:
         refs = ", ".join(f"!{mr['iid']}" for mr in mrs)
-        sys.exit(f"Several open MRs for branch '{branch}' ({refs}); pass one.")
+        fail(f"Several open MRs for branch '{branch}' ({refs}); pass one.")
     return get_mr(repo, mrs[0]["iid"]) if full else mrs[0]
 
 
@@ -439,7 +581,9 @@ class LineMapper:
 # ---------------------------------------------------------------------------
 def cmd_mr_list(args: argparse.Namespace) -> None:
     state = "all" if args.all else "opened"
-    result = collect_mrs(repo_from_cwd(), args.recursive, state, args.drafts)
+    result = collect_mrs(
+        repo_from_cwd(), args.recursive, state, args.drafts, args.approvals
+    )
     if args.json:
         print(json.dumps(result, indent=2))
         return
@@ -452,13 +596,26 @@ def cmd_mr_list(args: argparse.Namespace) -> None:
             mr.get("title", ""),
             ", ".join(mr.get("labels") or []),
         ]
+        if "_review" in mr:
+            fields.append(review_summary(mr["_review"]))
         # Tabs and newlines would break the columns.
         print("\t".join(" ".join(f.split()) for f in fields))
 
 
-def review_assign(repo: Repo, mr: dict) -> None:
+def review_assign(repo: Repo, mr: dict, only_if_free: bool = False) -> None:
+    """Add me to the reviewers of *mr*.
+
+    :param only_if_free: refuse when someone else reviews it already (exit 1).
+    """
     user = or_exit(repo.api, "GET", "/api/v4/user")
     reviewers = [r["id"] for r in mr.get("reviewers") or []]
+    others = [r["username"] for r in mr.get("reviewers") or [] if r["id"] != user["id"]]
+    if only_if_free and others:
+        fail(
+            f"!{mr['iid']} is already reviewed by "
+            + ", ".join("@" + u for u in others)
+            + " (--force to join)"
+        )
     if user["id"] not in reviewers:
         or_exit(
             repo.api,
@@ -470,8 +627,14 @@ def review_assign(repo: Repo, mr: dict) -> None:
 
 
 def cmd_mr_review_assign(args: argparse.Namespace) -> None:
-    repo, iid = parse_ref(repo_from_cwd(), args.ref)
-    review_assign(repo, get_mr(repo, iid))
+    if args.ref is not None:
+        repo, iid = parse_ref(repo_from_cwd(), args.ref)
+        mr = get_mr(repo, iid)
+    else:
+        repo = repo_from_cwd()
+        mr = resolve_mr(repo, None)
+    # Fresh from GitLab: someone may have picked it up since I looked.
+    review_assign(repo, mr, only_if_free=args.if_free and not args.force)
 
 
 def checkout_mr(mr: dict, path: str) -> str:
@@ -630,14 +793,9 @@ def cmd_mr_approve(args: argparse.Namespace) -> None:
     print("  approved")
 
 
-def cmd_mr_info(args: argparse.Namespace) -> None:
-    repo = repo_from_cwd()
-    if args.ref is not None:
-        repo, iid = parse_ref(repo, args.ref)
-        mr = get_mr(repo, iid)
-    else:
-        mr = resolve_mr(repo, None)
-    info = {
+def mr_info(repo: Repo, mr: dict, review: dict | None = None) -> dict:
+    """What the plugin shows of *mr*; *review* adds ``review_info``'s fields."""
+    return (review or {}) | {
         "ref": f"!{mr['iid']}",
         "iid": mr["iid"],
         "title": mr.get("title", ""),
@@ -648,11 +806,27 @@ def cmd_mr_info(args: argparse.Namespace) -> None:
         "state": mr.get("state"),
         "draft": bool(mr.get("draft")),
     }
+
+
+def cmd_mr_info(args: argparse.Namespace) -> None:
+    repo = repo_from_cwd()
+    if args.ref is not None:
+        repo, iid = parse_ref(repo, args.ref)
+        mr = get_mr(repo, iid)
+    else:
+        mr = resolve_mr(repo, None, ended=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approvals_job = pool.submit(get_approvals, repo, mr["iid"])
+        user_job = pool.submit(or_exit, repo.api, "GET", "/api/v4/user")
+        review = review_info(mr, approvals_job.result(), user_job.result()["username"])
+    info = mr_info(repo, mr, review)
     if args.json:
         print(json.dumps(info))
     else:
+        state = "" if info["state"] == "opened" else f" [{info['state']}]"
         print(
-            f"{info['ref']} {info['title']}\n  {info['source']} -> {info['target']}\n  {info['url']}"
+            f"{info['ref']}{state} {info['title']}\n  {info['source']} -> {info['target']}\n"
+            f"  {review_summary(review)}\n  {info['url']}"
         )
 
 
@@ -791,16 +965,31 @@ def emit_id(args: argparse.Namespace, ident: Any, what: str) -> None:
 
 def cmd_comment_list(args: argparse.Namespace) -> None:
     repo = repo_from_cwd()
-    mr = resolve_mr(repo, args.mr)
+    # Threads of a merged MR stay readable; only writes need an open one.
+    mr = resolve_mr(repo, args.mr, ended=True)
     # Independent and latency bound: fetch them concurrently.
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         disc_job = pool.submit(
             or_exit, repo.get_all, f"{repo.mr_path(mr['iid'])}/discussions"
         )
         user_job = pool.submit(or_exit, repo.api, "GET", "/api/v4/user")
+        # Approvals change while I review: every pull brings them.
+        approvals_job = (
+            pool.submit(get_approvals, repo, mr["iid"]) if args.with_mr else None
+        )
         discussions, me = disc_job.result(), user_job.result()["username"]
+        approvals = approvals_job.result() if approvals_job else None
     lines = LineMapper()
     threads = [t for d in discussions if (t := thread_json(d, me, lines))]
+    if args.with_mr:
+        info = mr_info(repo, mr, review_info(mr, approvals, me))
+        if mr.get("state") in ("merged", "closed") and mr.get("source_branch"):
+            # The branch moved on to a new MR: callers must not mix the two.
+            opened = mrs_for_branch(repo, mr["source_branch"])
+            if opened:
+                info["successor"] = mr_info(repo, opened[0])
+        print(json.dumps({"mr": info, "threads": threads}, indent=2))
+        return
     if args.json:
         print(json.dumps(threads, indent=2))
         return
@@ -889,7 +1078,7 @@ def cmd_comment_resolve(args: argparse.Namespace) -> None:
         # locally, so that is not an error.
         disc = or_exit(repo.api, "GET", path)
         if any(n.get("resolvable") for n in disc.get("notes") or []):
-            sys.exit(str(exc))
+            fail(str(exc), exc.status)
         print(f"{args.thread} is not resolvable on GitLab; state kept locally")
         return
     print(f"{'resolved' if resolved else 'reopened'} {args.thread}")
@@ -927,7 +1116,7 @@ def publish_only(
             repo.api("PUT", f"{mr_api}/draft_notes/{ident}/publish")
         except GitLabError as exc:
             print(json.dumps({"published": published}))
-            sys.exit(str(exc))
+            fail(str(exc), exc.status)
         published.append(ident)
     return published
 
@@ -1007,6 +1196,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--recursive", action="store_true", help="Include submodule projects."
     )
     ls.add_argument("--json", action="store_true", help="Print full MR data as JSON.")
+    ls.add_argument(
+        "--approvals",
+        action="store_true",
+        help="Add who approved and who reviews (one request per MR).",
+    )
     ls.set_defaults(fn=cmd_mr_list)
 
     co = mr.add_parser("checkout", help="Check out an MR's source branch.")
@@ -1017,7 +1211,13 @@ def build_parser() -> argparse.ArgumentParser:
     co.set_defaults(fn=cmd_mr_checkout)
 
     ra = mr.add_parser("review-assign", help="Assign yourself as reviewer.")
-    ra.add_argument("ref", metavar="REF")
+    ra.add_argument("ref", metavar="REF", nargs="?")
+    ra.add_argument(
+        "--if-free",
+        action="store_true",
+        help="Refuse when someone else reviews it already.",
+    )
+    ra.add_argument("--force", action="store_true", help="With --if-free: join anyway.")
     ra.set_defaults(fn=cmd_mr_review_assign)
 
     tg = mr.add_parser("target", help="Print the MR target ref.")
@@ -1050,6 +1250,11 @@ def build_parser() -> argparse.ArgumentParser:
     cl = comment.add_parser("list", help="List threads.")
     mr_opt(cl)
     cl.add_argument("--json", action="store_true")
+    cl.add_argument(
+        "--with-mr",
+        action="store_true",
+        help="Print {mr, threads} as JSON: the MR and its state too.",
+    )
     cl.set_defaults(fn=cmd_comment_list)
 
     ca = comment.add_parser(

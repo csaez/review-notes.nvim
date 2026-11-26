@@ -239,13 +239,20 @@ function M.item_action(item, action)
   actions[action](item.ctx, item.key)
 end
 
---- A statusline component: what waits for me in the current review.
+--- A statusline component: what waits for me in the current review, and
+--- whether syncing it works (offline, no access, MR merged or closed).
 ---@return string
 function M.status()
   local ctx = contexts[vim.api.nvim_get_current_buf()] or last_ctx
   local n = ctx and counts[ctx.path]
   if not n then return "" end
   local parts = {}
+  local s = ctx.kind == "git" and sync.state(ctx) or {}
+  if s.failing then
+    table.insert(parts, ({ offline = "offline", no_access = "no access", no_mr = "no MR" })[s.kind] or "pull failing")
+  elseif sync.ended(s.mr) then
+    table.insert(parts, s.mr.state)
+  end
   for _, k in ipairs({ "unread", "proposed", "unsent" }) do
     if n[k] > 0 then table.insert(parts, review.style[k].icon .. " " .. n[k]) end
   end
@@ -278,6 +285,7 @@ function M.setup(opts)
   if not listening then
     listening = true
     review.on_change(M.refresh)
+    sync.on_status(function() vim.cmd("redrawstatus!") end)
   end
   local group = vim.api.nvim_create_augroup("ReviewNotes", { clear = true })
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter", "FocusGained" }, {

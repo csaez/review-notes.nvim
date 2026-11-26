@@ -7,9 +7,16 @@ local M = {}
 ---@field watch boolean redraw when a notes file changes on disk
 ---@field auto_pull integer|false pull in the background on focus and on
 ---  entering the list, when the last pull is older than this many seconds
+---@field timeout integer|false seconds a backend command may run before it is stopped
 ---@field backend table<string, string[]> Command lines, run in the repo root.
 ---  `{path}`, `{line}`, `{thread}` and `{ids}` are substituted; text goes on stdin.
----    threads    prints [{id, path, line, resolved, comments = [{id, author, body}]}]
+---  `{mr}` is the IID of the merge request the review is on (what `threads`
+---  reported); an argument holding it is left out while none is known.
+---  Exit status 3 means the remote is unreachable, 4 no access, 5 no such MR.
+---    threads    prints [{id, path, line, resolved, comments = [{id, author, body}]}],
+---               or {mr = {iid, ref, state, url, successor}, threads = [...]}:
+---               state "merged" or "closed" stops automatic pulls, successor
+---               (an {iid, ref}) is the branch's new MR
 ---               path = null is a thread on the whole change; line 0 a whole
 ---               file; line (and start_line) are lines of the files on disk.
 ---               Optional: comments[].mine (my own comments never count as
@@ -27,7 +34,9 @@ local M = {}
 ---@field files fun(review: review_notes.ListInfo)? `f` in the list: the changed files
 
 ---@class review_notes.MrConfig
----@field info string[]? prints {ref, title, url, target, source, author} as JSON
+---@field info string[]? prints {ref, title, url, target, source, author} as JSON;
+---  optional: state, me, reviewers, approved_by, approvals_left (so do
+---  `threads`' mr, from each pull)
 ---@field actions review_notes.MrAction[]? under `m` in the list
 
 ---@class review_notes.MrAction
@@ -46,19 +55,22 @@ M.values = {
   signs = true,
   watch = true,
   auto_pull = 60,
+  timeout = 30,
   backend = {
-    threads = { "git-lab", "comment", "list", "--json" },
-    add = { "git-lab", "comment", "add", "--draft", "--json", "{path}:{line}", "-" },
-    general = { "git-lab", "comment", "add", "--draft", "--json", "-" },
-    reply = { "git-lab", "comment", "reply", "--draft", "--json", "{thread}", "-" },
-    resolve = { "git-lab", "comment", "resolve", "{thread}" },
-    unresolve = { "git-lab", "comment", "unresolve", "{thread}" },
-    submit = { "git-lab", "review", "submit", "--only", "{ids}", "--json" },
-    discard = { "git-lab", "review", "discard", "--only", "{ids}" },
+    threads = { "git-lab", "comment", "list", "--with-mr", "--mr={mr}" },
+    add = { "git-lab", "comment", "add", "--mr={mr}", "--draft", "--json", "{path}:{line}", "-" },
+    general = { "git-lab", "comment", "add", "--mr={mr}", "--draft", "--json", "-" },
+    reply = { "git-lab", "comment", "reply", "--mr={mr}", "--draft", "--json", "{thread}", "-" },
+    resolve = { "git-lab", "comment", "resolve", "--mr={mr}", "{thread}" },
+    unresolve = { "git-lab", "comment", "unresolve", "--mr={mr}", "{thread}" },
+    submit = { "git-lab", "review", "submit", "--mr={mr}", "--only", "{ids}", "--json" },
+    discard = { "git-lab", "review", "discard", "--mr={mr}", "--only", "{ids}" },
   },
   mr = {
-    info = { "git-lab", "mr", "info", "--json" },
+    info = { "git-lab", "mr", "info", "--json", "!{mr}" },
     actions = {
+      { key = "r", desc = "review it: assign me, unless someone else reviews it", cmd = { "git-lab", "mr", "review-assign", "--if-free", "{ref}" } },
+      { key = "R", desc = "review it with the others: assign me anyway", cmd = { "git-lab", "mr", "review-assign", "{ref}" } },
       { key = "a", desc = "approve the MR (optional comment)", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
       { key = "o", desc = "open in the browser", fn = function(mr) if mr.url then vim.ui.open(mr.url) end end },
     },
