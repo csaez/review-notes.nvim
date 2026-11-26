@@ -1,7 +1,7 @@
 # review-notes.nvim: design
 
-This document describes the design as it is meant to be now; it is kept
-current, not a history. Work not done yet is listed under "Next" at the end.
+This document describes the design as it is now; it is kept current, not a
+history.
 The README is the user documentation. Backward compatibility of commands,
 keymaps and options is not a goal; the notes file format stays.
 
@@ -116,7 +116,7 @@ windows.
 
 `:Review` opens the sidebar in list mode and moves the cursor there; when
 the cursor is already in the sidebar, it closes it. `q` closes it from
-either mode. Both buffers redraw when the notes file or the sidecar change
+either mode; as the last window of the tab it leaves an empty buffer. Both buffers redraw when the notes file or the sidecar change
 (file watcher), so pi and pulls show up live.
 
 ### The code window
@@ -132,7 +132,8 @@ the code window alone.
 
 ```
 Review  cs/9.5/usl-composed-drop-target
-!1234 -> main   2 unread  1 proposed  3 unsent  9 open  4 resolved
+!1234 -> main  Composed drop target
+2 unread  1 proposed  3 not published  9 open  4 resolved
 pulled 5 min ago
 
 Unread (2)
@@ -149,9 +150,9 @@ Resolved (4)  ...
 
 - Sections in urgency order, each a fold; Resolved starts folded. A thread
   is one line: anchor (path relative to the repo, `change` for the whole
-  change), tags, the author and first line of the last comment. At 72
-  columns, long anchors are cut from the left (`...tor/Editor.py:267`) and
-  the summary is cut at the edge; thread mode shows everything.
+  change), tags, the author and first line of the last comment. Anchors
+  longer than 28 columns are cut from the left (`...tor/Editor.py:267`) and
+  the summary at the window's edge; thread mode shows everything.
 - The cursor starts on the first thread, so `<CR>` works at once.
 - `<CR>` shows the thread under the cursor in thread mode; the code window
   follows and the cursor stays in the sidebar. `o` does the same and moves
@@ -384,9 +385,9 @@ The git-lab script in `extras/` implements it for GitLab.
 | `review.lua`      | the current review: context, items, sorting, watcher, change listeners |
 | `sync.lua`        | pull and publish                                           |
 | `actions.lua`     | the verbs, on items: resolve, approve, discard, reply, ... |
-| `sidebar.lua`     | the sidebar window: modes, the code window, list order     |
+| `sidebar.lua`     | the sidebar window and the code window                     |
 | `list.lua`        | list mode: drawing, folds, review-wide keys, MR hooks      |
-| `thread.lua`      | thread mode: drawing, winbar                               |
+| `thread.lua`      | thread mode: drawing, winbar, thread keys, list order      |
 | `signs.lua`       | anchors (extmarks) and signs in code buffers               |
 | `compose.lua`     | the composer float                                         |
 | `snacks.lua`      | the finder, a snacks picker source                         |
@@ -408,18 +409,3 @@ logic is testable in plain Lua, and a fake backend script covers the rest.
   proposed reply until I approve it.
 - Because proposed comments never publish without approval, running it in
   the middle of a pull from a peer is harmless.
-
-## Next
-
-The code still has the earlier UI: a home buffer that replaces the current
-window (`home.lua`) and a separate thread panel (`panel.lua`), and the
-finder still binds every thread key. Steps to the sidebar:
-
-1. `sidebar.lua` from `panel.lua`: the window, `winfixbuf`, the code window,
-   mode switching, list order.
-2. `list.lua` from `home.lua`, drawn in the sidebar window; `thread.lua`
-   from the panel's drawing. Remove `home.lua` and `panel.lua`.
-3. `init.lua`: `:Review` toggles, `thread()`, `next()` and the public API
-   (`home()`, `open_item`, `goto_item`) on the sidebar.
-4. `snacks.lua`: search the whole thread, keep `<CR>` and `<a-o>` only.
-5. Specs: `home_spec` and `panel_spec` become `sidebar_spec`; README.
