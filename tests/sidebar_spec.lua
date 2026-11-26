@@ -145,6 +145,12 @@ describe("sidebar, thread mode", function()
     assert.truthy(vim.wo[w].winbar:find("1/3", 1, true))
   end)
 
+  it("items search the whole conversation, for the finder", function()
+    local text = vim.tbl_filter(function(i) return i.key == "t1" end, review.items())[1].text
+    assert.truthy(text:find("@al why?", 1, true))
+    assert.truthy(table.concat(thread.lines(review.items()[1]), "\n"):find("^# ", 1))
+  end)
+
   it("reuses one window and q closes it", function()
     thread.show(ctx, "t1")
     thread.show(ctx, "g")

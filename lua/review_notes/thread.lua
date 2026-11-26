@@ -55,29 +55,36 @@ end
 
 -- Drawing ---------------------------------------------------------------------
 
+--- The thread as thread mode shows it: a heading, the status line (line 2,
+--- highlighted with `item.hl`), the conversation. The finder's preview too.
+---@param item review_notes.Item
+---@return string[]
+function M.lines(item)
+  local t = item.entry.thread
+  local n = #t.comments
+  local bits = { item.state }
+  vim.list_extend(bits, item.tags)
+  local by = item.entry.state and item.entry.state.resolved_by
+  if by and t.status == "resolved" then table.insert(bits, "by @" .. by) end
+  table.insert(bits, n == 1 and "1 comment" or (n .. " comments"))
+  if t.moved then table.insert(bits, "its lines were deleted") end
+  local lines = {
+    "# " .. (item.kind == "change" and "change (the whole merge request)" or item.anchor),
+    item.icon .. " " .. table.concat(bits, ", "),
+    "",
+  }
+  vim.list_extend(lines, item.thread)
+  while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
+  return lines
+end
+
 local function render()
   if not (state.buf and sidebar.shows(state.buf)) then return end
   local win = sidebar.win() --[[@as integer]]
   local items = state.ctx and review.items(state.ctx) or {}
   local item = current()
-  local lines, status_hl = {}, nil
-  if not item then
-    lines = { "This thread is gone: deleted, or published under a new id." }
-  else
-    local entry = item.entry
-    local t = entry.thread
-    local n = #t.comments
-    local bits = { item.state }
-    vim.list_extend(bits, item.tags)
-    local by = entry.state and entry.state.resolved_by
-    if by and t.status == "resolved" then table.insert(bits, "by @" .. by) end
-    table.insert(bits, n == 1 and "1 comment" or (n .. " comments"))
-    if t.moved then table.insert(bits, "its lines were deleted") end
-    lines = { "# " .. (item.kind == "change" and "change (the whole merge request)" or item.anchor), item.icon .. " " .. table.concat(bits, ", "), "" }
-    status_hl = item.hl
-    vim.list_extend(lines, item.thread)
-    while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
-  end
+  local lines = item and M.lines(item) or { "This thread is gone: deleted, or published under a new id." }
+  local status_hl = item and item.hl
   local buf = state.buf --[[@as integer]]
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)

@@ -270,7 +270,7 @@ M.style = {
 ---@field summary string first line of the last comment
 ---@field who string author of the last comment: `@name`, `me`, `me (proposed)`
 ---@field thread string[] the conversation as markdown lines, for a preview
----@field text string searchable text
+---@field text string searchable text: the anchor, tags and the whole conversation
 ---@field rank integer
 ---@field order integer place in the notes file
 
@@ -289,6 +289,16 @@ local function thread_markdown(t)
     table.insert(out, "")
   end
   return out
+end
+
+--- The whole conversation on one line, for searching.
+local function search_text(t)
+  local out = {}
+  for _, c in ipairs(t.comments) do
+    table.insert(out, who(c, "me"))
+    table.insert(out, (c.body:gsub("%s+", " ")))
+  end
+  return table.concat(out, " ")
 end
 
 --- Every thread of *ctx*, urgent first: unread, proposed, not published,
@@ -341,7 +351,7 @@ function M.items(ctx)
       summary = summary,
       who = last and who(last, "me") or "",
       thread = thread_markdown(t),
-      text = table.concat({ state, store.anchor_string(t.anchor), table.concat(tags, " "), summary }, " "),
+      text = table.concat({ state, store.anchor_string(t.anchor), table.concat(tags, " "), search_text(t) }, " "),
       rank = rank,
       order = i,
     }

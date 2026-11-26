@@ -1,23 +1,13 @@
--- A snacks.nvim picker source for the threads of the current review, built
--- on `actions` so its keys match the panel and the home:
---   <CR> show in the panel, <a-o> go to the code,
---   <a-r> reply, <a-x> resolve, <a-a> approve, <a-d> discard, <a-m> mark read.
+-- The finder: a snacks.nvim picker source to jump to a thread of the current
+-- review from anywhere. It searches the anchor, the tags and the whole
+-- conversation. Acting on threads is the sidebar's job, so the keys are few:
+--   <CR> show the thread in the sidebar, <a-o> go to the code.
 -- Register it with `picker = { sources = { review_notes = require("review_notes.snacks").source } }`
 -- or open it directly with `require("review_notes.snacks").open()`.
 local review = require("review_notes.review")
-local actions = require("review_notes.actions")
 local thread = require("review_notes.thread")
 
 local M = {}
-
---- Run *fn* on the item, then refresh the list (the item moved section).
-local function act(fn)
-  return function(picker, item)
-    if not item then return end
-    fn(item.ctx, item.key)
-    picker:find()
-  end
-end
 
 M.source = {
   title = "Review threads",
@@ -46,7 +36,7 @@ M.source = {
   preview = function(ctx)
     ctx.preview:reset()
     ctx.preview:set_title(ctx.item.anchor)
-    ctx.preview:set_lines(ctx.item.thread or {})
+    ctx.preview:set_lines(thread.lines(ctx.item))
     ctx.preview:highlight({ ft = "markdown" })
   end,
   confirm = function(picker, item)
@@ -58,36 +48,17 @@ M.source = {
       picker:close()
       if item then thread.go_to(item) end
     end,
-    review_reply = function(picker, item)
-      picker:close()
-      if item then actions.reply(item.ctx, item.entry) end
-    end,
-    review_resolve = act(actions.resolve),
-    review_read = act(actions.read),
-    review_approve = function(picker, item)
-      if not item then return end
-      actions.approve_items({ item })
-      picker:find()
-    end,
-    review_discard = function(picker, item)
-      if item then actions.discard_items({ item }, function() picker:find() end) end
-    end,
   },
   win = {
     input = {
       keys = {
         ["<a-o>"] = { "review_code", mode = { "n", "i" }, desc = "go to the code" },
-        ["<a-r>"] = { "review_reply", mode = { "n", "i" }, desc = "reply" },
-        ["<a-x>"] = { "review_resolve", mode = { "n", "i" }, desc = "resolve / reopen" },
-        ["<a-a>"] = { "review_approve", mode = { "n", "i" }, desc = "approve proposed" },
-        ["<a-d>"] = { "review_discard", mode = { "n", "i" }, desc = "discard unpublished" },
-        ["<a-m>"] = { "review_read", mode = { "n", "i" }, desc = "mark read" },
       },
     },
   },
 }
 
---- Open the picker (snacks.nvim must be installed).
+--- Open the finder (snacks.nvim must be installed).
 ---@param opts table? merged into the source
 function M.open(opts)
   local ok, snacks = pcall(require, "snacks")
