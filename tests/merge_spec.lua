@@ -184,32 +184,32 @@ describe("relocate", function()
   end)
 end)
 
-describe("notes for the agent", function()
+describe("private comments", function()
   local side = { threads = { t1 = { status = "open", seen = {}, seen_status = true } } }
 
-  it("a thread started with a note never publishes, its replies and resolve neither", function()
+  it("a thread started private never publishes, its replies and resolve neither", function()
     local doc = store.parse({
-      "## a.c:1", "status: resolved", "", "### me (note)", "rename this", "", "### me (local)", "and that", "",
+      "## a.c:1", "status: resolved", "", "### me (private)", "rename this", "", "### me (local)", "and that", "",
     })
-    assert.is_true(merge.local_only(doc.threads[1]))
+    assert.is_true(merge.is_private(doc.threads[1]))
     assert.are.same({}, merge.plan(doc, side).items)
     local f = merge.flags(doc.threads[1], nil)
-    assert.is_true(f.local_only)
+    assert.is_true(f.is_private)
     assert.is_false(f.unsent)
   end)
 
-  it("a note on a remote thread is not sent, the rest of the thread is", function()
+  it("a private comment on a remote thread is not sent, the rest of the thread is", function()
     local doc = store.parse({
-      "## b.c:2 {id=t1}", "status: resolved", "", "### @x {id=1}", "q", "", "### me (note)", "ask pi", "",
+      "## b.c:2 {id=t1}", "status: resolved", "", "### @x {id=1}", "q", "", "### me (private)", "ask pi", "",
     })
     local kinds = vim.tbl_map(function(i) return i.kind end, merge.plan(doc, side).items)
     assert.are.same({ "resolve" }, kinds)
     assert.is_true(merge.has_unpublished(doc.threads[1]))
   end)
 
-  it("approve means agreed on a local-only thread and on a finding before the MR, send otherwise", function()
+  it("approve means agreed on a private thread and on a finding before the MR, send otherwise", function()
     local doc = store.parse({
-      "## a.c:1", "status: open", "", "### me (note)", "x", "", "### me (proposed)", "done", "",
+      "## a.c:1", "status: open", "", "### me (private)", "x", "", "### me (proposed)", "done", "",
       "## a.c:2", "status: open", "", "### me (proposed)", "NIT: finding", "",
       "## a.c:3", "status: open", "", "### me (proposed)", "NIT: finding on an MR", "",
       "## b.c:2 {id=t1}", "status: open", "", "### @x {id=1}", "q", "", "### me (proposed)", "reply", "",
@@ -218,9 +218,9 @@ describe("notes for the agent", function()
     merge.approve(doc.threads[2], true)
     merge.approve(doc.threads[3], false)
     merge.approve(doc.threads[4], true)
-    assert.are.equal("note", doc.threads[1].comments[2].source)
-    assert.are.equal("note", doc.threads[2].comments[1].source)
-    assert.is_true(merge.local_only(doc.threads[2]))
+    assert.are.equal("private", doc.threads[1].comments[2].source)
+    assert.are.equal("private", doc.threads[2].comments[1].source)
+    assert.is_true(merge.is_private(doc.threads[2]))
     assert.are.equal("local", doc.threads[3].comments[1].source)
     assert.are.equal("local", doc.threads[4].comments[2].source)
     local kinds = vim.tbl_map(function(i) return i.kind end, merge.plan(doc, side).items)

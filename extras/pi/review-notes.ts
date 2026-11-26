@@ -24,8 +24,8 @@
  *
  * Everything pi writes is a `### me (proposed)` comment: the plugin never
  * publishes it until the human approves it, so a round of pi can run at any
- * time, even while peers comment. `### me (note)` is the human writing to pi
- * only; the plugin never publishes it. /fixup is for the human's own branch:
+ * time, even while peers comment. `### me (private)` (formerly `me (note)`)
+ * is the human writing to pi or to themselves; the plugin never publishes it. /fixup is for the human's own branch:
  * on a peer's MR (the sidecar's mr.author is not mr.me) it refuses. Resolving a thread is `status: resolved` on
  * it, held back by the plugin until the proposed reply is approved.
  *
@@ -41,10 +41,10 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
 interface Comment {
-  who: string; // "@alice", "me (local)", "me (proposed)", "me (note)"
+  who: string; // "@alice", "me (local)", "me (proposed)", "me (private)"
   proposed: boolean; // written by a tool, waits for approval
-  mine: boolean; // mine, not published yet (local or note)
-  note: boolean; // mine, for the agent only: never published
+  mine: boolean; // mine, not published yet (local or private)
+  private: boolean; // mine, never published
   published: boolean; // a remote comment of mine ({mine}, or @<me>)
   body: string;
 }
@@ -170,12 +170,13 @@ export default function reviewNotes(pi: ExtensionAPI) {
         sawStatus = false;
       } else if (h && h[1] === "###" && thread) {
         const who = h[2]!;
-        const note = who === "me (note)";
+        // `me (note)` is the old name of `me (private)`.
+        const isPrivate = who === "me (private)" || who === "me (note)";
         comment = {
           who,
           proposed: who === "me (proposed)",
-          mine: note || who === "me" || who === "me (local)",
-          note,
+          mine: isPrivate || who === "me" || who === "me (local)",
+          private: isPrivate,
           published: /(?:^|\s)mine(?:\s|$)/.test(h[3] ?? ""),
           body: "",
         };
@@ -189,7 +190,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
           comment.body += (comment.body ? "\n" : "") + line.replace(/^\\(\\*#)/, "$1");
         } else if (line.trim()) {
           // Bare text under a thread is one local comment, as in the plugin.
-          comment = { who: "me (local)", proposed: false, mine: true, note: false, published: false, body: line };
+          comment = { who: "me (local)", proposed: false, mine: true, private: false, published: false, body: line };
           thread.comments.push(comment);
         }
       }
@@ -218,7 +219,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
 
   // Whose turn it is, from the thread and the MR. Pi's when the thread is open
   // and the last word that is not pi's asks it to act:
-  // - a note (`me (note)`): written for pi, always;
+  // - a private comment (`me (private)`): never published, so for pi, always;
   // - my unpublished comment: only before the MR (then it can only be for pi);
   //   after, it is going to a peer;
   // - a peer's comment: only on my own MR (*mine*), where pi plays the author.
@@ -230,7 +231,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
     if (t.resolved || t.comments.length === 0) return false;
     const last = t.comments[t.comments.length - 1]!;
     if (last.proposed) return t.comments.length === 1;
-    if (last.note) return true;
+    if (last.private) return true;
     if (last.mine) return !mr;
     if (last.published) return false;
     return !mr || isMyMr(mr);
@@ -263,7 +264,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
 
   // On a peer's MR, my open threads that the author answered since my last
   // word: /review checks each against the code before looking for new
-  // findings. Mine: I started it (published, local or a note).
+  // findings. Mine: I started it (published, local or private).
   const threadsToRecheck = (notesFile: string): Thread[] => {
     const mr = readMr(notesFile);
     if (!mr || isMyMr(mr)) return [];
@@ -297,8 +298,8 @@ export default function reviewNotes(pi: ExtensionAPI) {
     "`path` a whole file, `path:N` or `path:N-M` code; a `{id=X}` after the anchor is a remote " +
     "thread. The line after it is `status: open` or `status: resolved`. `### <who>` starts a " +
     "comment: `### @alice` is a remote comment, `### me (local)` is mine (the human's) and not " +
-    "published yet, `### me (note)` is mine and only for you (never published), `### me (proposed)` " +
-    "is yours. Never edit `@author`, `me (local)` or `me (note)` comments, or `{id=...}` " +
+    "published yet, `### me (private)` is mine and never published (for you, not for peers), `### me (proposed)` " +
+    "is yours. Never edit `@author`, `me (local)` or `me (private)` comments, or `{id=...}` " +
     "attributes. A body line that starts with `#` is written with a leading `\\`.";
 
   const label = (t: Thread): string => {
@@ -321,7 +322,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
   // approve them, so acting on them needs no approval.
   const RESOLVE_RULES = [
     "Read every listed thread and the `change` threads before changing anything.",
-    "A thread's severity is the tag that starts its first comment; a later `me (local)` or `me (note)` comment or an `@author` reply can change what is asked, and wins. No tag (a peer's or my own comment): treat it as a request, do it unless it is unclear.",
+    "A thread's severity is the tag that starts its first comment; a later `me (local)` or `me (private)` comment or an `@author` reply can change what is asked, and wins. No tag (a peer's or my own comment): treat it as a request, do it unless it is unclear.",
     "FIX: mandatory. Make the change. If it is wrong or impossible, say why in the reply and leave the thread open.",
     "CHECK: verify first (read the code, run the relevant tests). A real problem: fix it as for FIX. Not a problem: no change, reply with the evidence.",
     "CONSIDER and NIT: optional, judge them. Do the change when it is clearly better and cheap; otherwise decline in the reply with a short reason. Never a reason to touch unrelated code.",

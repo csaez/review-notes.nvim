@@ -1,7 +1,7 @@
 -- The verbs on threads, in one place: every UI (the code buffer keys, the
--- finder, the sidebar) calls these. A thread is named by its review and key;
+-- sidebar) calls these. A thread is named by its review and key;
 -- the change is local until `publish`. The `*_items`
--- variants take finder / list items and tell when there is nothing to do.
+-- variants take list items and tell when there is nothing to do.
 local store = require("review_notes.store")
 local merge = require("review_notes.merge")
 local review = require("review_notes.review")
@@ -10,6 +10,9 @@ local compose = require("review_notes.compose")
 local M = {}
 
 local notify = review.notify
+
+--- Mine and not published: a local comment or a private one.
+local function is_mine(c) return c.source == "local" or c.source == "private" end
 
 --- Resolve or reopen. Resolving something someone else resolved only
 --- accepts it.
@@ -31,22 +34,22 @@ function M.read(ctx, key)
   review.edit_thread(ctx, key, function(t, _, side) merge.mark_seen(t, side) end)
 end
 
---- Whether the review is private: a document, or a branch with no MR yet.
---- Then my new threads start as notes, and approving a finding means "agreed".
+--- Whether the review has no MR yet (or is a document, which never has
+--- one). Then my new threads start private, and approving a finding means
+--- "agreed".
 ---@param ctx review_notes.Context
 ---@param side review_notes.Sidecar
 ---@return boolean
-function M.private(ctx, side)
+function M.pre_mr(ctx, side)
   return ctx.kind ~= "git" or not side.mr
 end
 
 --- Approve what a tool proposed: on a thread that publishes, so `publish`
---- sends it; on a local-only one (or any finding while the review is
---- private), as agreed.
+--- sends it; on a private one (or any finding before the MR), as agreed.
 ---@param ctx review_notes.Context
 ---@param key string
 function M.approve(ctx, key)
-  review.edit_thread(ctx, key, function(t, _, side) merge.approve(t, M.private(ctx, side)) end)
+  review.edit_thread(ctx, key, function(t, _, side) merge.approve(t, M.pre_mr(ctx, side)) end)
 end
 
 --- Approve every proposed comment of the review.
@@ -55,8 +58,8 @@ end
 function M.approve_all(ctx)
   return review.edit(ctx, function(doc, side)
     local total = 0
-    local private = M.private(ctx, side)
-    for _, t in ipairs(doc.threads) do total = total + merge.approve(t, private) end
+    local pre_mr = M.pre_mr(ctx, side)
+    for _, t in ipairs(doc.threads) do total = total + merge.approve(t, pre_mr) end
     return total
   end) or 0
 end
@@ -105,6 +108,70 @@ function M.resolve_verb(item)
   local t = item.entry.thread
   if merge.resolved_unseen(t, item.entry.state) then return "accept" end
   return t.status == "resolved" and "reopen" or "resolve"
+end
+
+--- The comment whose kind decides whether *t* is published: on a new thread
+--- its first comment (a private one makes the whole thread private), on
+--- a published one my reply not sent yet. nil when there is none of mine.
+---@param t review_notes.Thread
+---@return review_notes.Comment?
+local function kind_target(t)
+  if not t.id then
+    local first = t.comments[1]
+    return first and is_mine(first) and first or nil
+  end
+  local mine
+  for _, c in ipairs(t.comments) do
+    if is_mine(c) then mine = c end
+  end
+  return mine
+end
+
+--- Whether *item* has a comment of mine `toggle_private` can switch (never
+--- in a document's review, which does not publish).
+---@param item review_notes.Item
+---@return boolean
+function M.can_toggle_private(item)
+  return item.ctx.kind == "git" and kind_target(item.entry.thread) ~= nil
+end
+
+--- What `toggle_private` makes of *item*: "private" or "public".
+---@param item review_notes.Item
+---@return string
+function M.private_verb(item)
+  local c = kind_target(item.entry.thread)
+  return c and c.source == "private" and "public" or "private"
+end
+
+--- Switch a thread between private (never published) and public, as
+--- `<C-t>` does in the composer: a new thread becomes private or
+--- publishable, a published one gets my pending reply switched.
+---@param ctx review_notes.Context
+---@param key string
+function M.toggle_private(ctx, key)
+  if ctx.kind ~= "git" then return notify("a document's review never publishes") end
+  review.edit_thread(ctx, key, function(t)
+    local c = kind_target(t)
+    if not c then return notify("no unpublished text of mine to switch") end
+    local to = c.source == "private" and "local" or "private"
+    if t.id then
+      c.source = to
+      return
+    end
+    -- Replies on a private thread are private too: the whole thread switches.
+    for _, other in ipairs(t.comments) do
+      if is_mine(other) then other.source = to end
+    end
+  end)
+end
+
+--- Switch the threads of *items* between private and public.
+---@param items review_notes.Item[]
+function M.toggle_private_items(items)
+  if #items == 0 then return end
+  local list = vim.tbl_filter(M.can_toggle_private, items)
+  if #list == 0 then return notify("no unpublished text of mine to switch") end
+  for _, i in ipairs(list) do M.toggle_private(i.ctx, i.key) end
 end
 
 --- Delete the unpublished part of a thread (mine and proposed). Remote
@@ -182,18 +249,14 @@ end
 ---@field key string? an existing thread
 ---@field anchor review_notes.Anchor? where to start a new one
 
---- Mine and not published: a local comment or a note.
-local function is_mine(c) return c.source == "local" or c.source == "note" end
-
 --- Save my comment of a thread (the one not published yet); an empty text
---- removes it, and a new thread with nothing left. *note* writes it as a
---- note for the agent, never published; a reply on a local-only thread is
---- always one.
+--- removes it, and a new thread with nothing left. *private* writes it as
+--- private, never published; a reply on a private thread always is.
 ---@param ctx review_notes.Context
 ---@param target review_notes.Target
 ---@param text string
----@param note boolean?
-function M.save_comment(ctx, target, text, note)
+---@param private boolean?
+function M.save_comment(ctx, target, text, private)
   review.edit(ctx, function(doc)
     local thread
     if target.key then
@@ -206,7 +269,7 @@ function M.save_comment(ctx, target, text, note)
       thread = { anchor = target.anchor, status = "open", comments = {} }
       table.insert(doc.threads, thread)
     end
-    local source = (note or merge.local_only(thread)) and "note" or "local"
+    local source = (private or merge.is_private(thread)) and "private" or "local"
     local mine
     for _, c in ipairs(thread.comments) do
       if is_mine(c) then mine = c end
@@ -227,34 +290,34 @@ function M.save_comment(ctx, target, text, note)
   end)
 end
 
---- The composer starts as a note on a local-only thread (and stays one),
---- on my existing note, and on a thread not published yet while the review
---- is private; as a comment for the remote otherwise. `<C-t>` switches.
+--- The composer starts private on a private thread (and stays so), on my
+--- existing private comment, and on a thread not published yet before the
+--- MR; public otherwise. `<C-t>` switches.
 local function open_composer(ctx, target, title, thread, win)
   local existing
   for _, c in ipairs(thread and thread.comments or {}) do
     if is_mine(c) then existing = c end
   end
   -- A document's review never publishes: plain comments, nothing to switch.
-  local fixed = ctx.kind ~= "git" or (thread ~= nil and merge.local_only(thread))
-  local note = false
+  local fixed = ctx.kind ~= "git" or (thread ~= nil and merge.is_private(thread))
+  local private = false
   if ctx.kind ~= "git" then
-    note = false
+    private = false
   elseif fixed then
-    note = true
+    private = true
   elseif existing then
-    note = existing.source == "note"
+    private = existing.source == "private"
   elseif not (thread and thread.id) then
     local _, side = review.read(ctx)
-    note = M.private(ctx, side)
+    private = M.pre_mr(ctx, side)
   end
   compose.open({
     title = title,
     text = existing and existing.body,
     win = win,
-    note = note,
+    start_private = private,
     fixed = fixed,
-    on_save = function(text, as_note) M.save_comment(ctx, target, text, as_note) end,
+    on_save = function(text, as_private) M.save_comment(ctx, target, text, as_private) end,
   })
 end
 

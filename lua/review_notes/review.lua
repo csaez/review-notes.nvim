@@ -285,7 +285,7 @@ M.style = {
 ---@field hl string
 ---@field tags string[]
 ---@field summary string first line of the last comment
----@field who string author of the last comment: `@name`, `me`, `me (proposed)`, `me (note)`
+---@field who string author of the last comment: `@name`, `me`, `me (proposed)`, `me (private)`
 ---@field thread string[] the conversation as markdown lines, for a preview
 ---@field text string searchable text: the anchor, tags and the whole conversation
 ---@field rank integer
@@ -295,7 +295,7 @@ M.style = {
 ---@param mine string the label of my unpublished comments
 local function who(c, mine)
   if c.source == "remote" then return "@" .. (c.author or "unknown") end
-  if c.source == "note" then return "me (note)" end
+  if c.source == "private" then return "me (private)" end
   return c.source == "proposed" and "me (proposed)" or mine
 end
 
@@ -346,7 +346,7 @@ function M.items(ctx)
     if f.resolved and state ~= "resolved" then table.insert(tags, "resolved") end
     if f.proposed and state ~= "proposed" then table.insert(tags, "proposed") end
     if f.unsent and state ~= "unsent" then table.insert(tags, "unsent") end
-    if f.local_only then table.insert(tags, "local") end
+    if f.is_private then table.insert(tags, "private") end
     local summary = last and vim.split(last.body, "\n", { plain = true })[1] or ""
     local file = kind == "change" and ctx.path or M.full_path(t.anchor.path, ctx.root)
     -- A submodule's pointer change is anchored on a directory: editing it

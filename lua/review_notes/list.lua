@@ -409,6 +409,9 @@ local function keys_of(buf)
       hint = when("approve", actions.can_approve), fn = function() actions.approve_items(selected(buf)) end },
     { lhs = "d", group = "Thread", desc = "discard unpublished (also a visual selection)", modes = nx,
       hint = when("discard", actions.can_discard), fn = function() actions.discard_items(selected(buf)) end },
+    { lhs = "t", group = "Thread", desc = "make private (never published) / public (also a visual selection)",
+      modes = nx, hint = when(function(i) return "make " .. actions.private_verb(i) end, actions.can_toggle_private),
+      fn = function() actions.toggle_private_items(selected(buf)) end },
     { lhs = "R", group = "Thread", desc = "mark read (also a visual selection)", modes = nx,
       hint = when("read", function(i) return i.state == "unread" end), fn = each(buf, actions.read) },
 

@@ -25,16 +25,16 @@ Every workflow combines two loops around one notes file per branch.
 
 - The agent (pi, Claude Code, ...) writes **proposed** comments and
   commits; it never talks to the platform.
-- I write to the agent with **notes** (`me (note)`): never published. A
-  thread started with one is local only. Before the MR, new threads start
-  as notes.
+- I write to the agent with **private** comments (`me (private)`): never
+  published. A thread started with one is private as a whole. Before the
+  MR, new threads start private.
 - The platform (GitLab, GitHub, ...) is the source of truth for the MR
   (merge or pull request) and its threads. A backend is a CLI that speaks
   the operations in README.md.
 - **Approve** means "send it" on a thread that publishes, "agreed" on a
-  local-only one or on a finding before the MR (the text becomes a note).
+  private one or on a finding before the MR (the text becomes private).
 - **Whose turn:** the agent acts on an open thread when the last word that
-  is not its own is a note, my unpublished comment before the MR, or a
+  is not its own is a private comment, my unpublished comment before the MR, or a
   peer's comment on my MR. My published reply last waits for the peer.
 
 | Place       | What                                                           |
@@ -88,13 +88,13 @@ Every workflow combines two loops around one notes file per branch.
 2. **Read the diff.** gitsigns against the target (the nearest protected
    branch while there is no MR).
 3. **Agent reviews.** `/review` on my branch: findings for me.
-4. **Self-review.** `<leader>rn` writes notes for the agent; approve (agreed,
-   it stays a note) or discard its findings. Nothing here can publish.
+4. **Self-review.** `<leader>rn` writes private comments for the agent; approve
+   (agreed, it stays private) or discard its findings. Nothing here can publish.
 5. **Agent fixes.** `/fixup` (clean tree): records the `fixup` checkpoint,
    one `fixup!` commit per note's commit, a proposed reply and a resolve
    per thread; unclear notes get a proposed question.
 6. **Check.** `f` "since the agent's last fixup", read its replies; reopen,
-   add notes; back to 5.
+   add private comments; back to 5.
 
 ## C. My MR under review (remote, with a local loop inside)
 
@@ -103,7 +103,7 @@ Every workflow combines two loops around one notes file per branch.
 2. **Peers comment.** Pulls bring their threads, and edits, in as unread.
 3. **Triage.** Reply (`r`) where it needs discussion: my published reply
    keeps the agent off the thread. Leave the clear ones to the agent, add
-   a note (`<C-t>` in the composer) to steer it, or fix them by hand.
+   a private comment (`<C-t>` in the composer, `t` in the sidebar) to steer it, or fix them by hand.
 4. **Agent fixes.** `/fixup`: fixups and proposed replies, as in B5.
 5. **Review the agent's work.** `f` "since the agent's last fixup", its
    replies; approve (`a`, `A`), edit or discard.
@@ -128,7 +128,7 @@ Severity: **medium** misleads or blocks a step; **low** costs time.
 ### Anchors and history
 
 1. **Local notes drift (A8, B5, C4; medium).** Remote threads are re-mapped
-   on every pull. Local, note and proposed ones only follow edits made in
+   on every pull. Local, private and proposed ones only follow edits made in
    nvim buffers; the agent's commits, a rebase, a force-push or an
    autosquash shift lines under them.
 2. **A reused branch name inherits an old review (A11, C7; medium).** A new

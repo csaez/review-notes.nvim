@@ -45,8 +45,9 @@ file, scripts and coding agents can read and answer them too.
   what it created).
 - **Agents propose, you approve.** What a tool writes is a proposed comment:
   never published until you approve it.
-- **Notes for the agent stay local.** A note (`me (note)`) is for the agent
-  only and never published; a thread started with one is local only. Before
+- **Private comments are never published.** A private comment (`me
+  (private)`) is for you and the agent, never for peers; a thread started
+  with one is private as a whole. Before
   the branch has an MR, new threads start as notes, and approving an agent's
   finding means "agreed", not "send".
 - **Unread is a highlight, not a gate.** Threads with comments you have not
@@ -66,7 +67,6 @@ file, scripts and coding agents can read and answer them too.
 - git
 - A [Nerd Font](https://www.nerdfonts.com/), for the default icons
 - To sync: a backend, such as the [git-lab extra](#git-lab)
-- Optional: [snacks.nvim](https://github.com/folke/snacks.nvim) for the finder
 
 ## Installation
 
@@ -82,7 +82,6 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
     { "<leader>rt", function() require("review_notes").thread() end, desc = "Review: thread here" },
     { "<leader>rn", function() require("review_notes").new() end, mode = { "n", "x" }, desc = "Review: new thread" },
     { "<leader>rN", function() require("review_notes").new_change() end, desc = "Review: new thread on the change" },
-    { "<leader>rf", function() require("review_notes.snacks").open() end, desc = "Review: find threads" },
     { "]r", function() require("review_notes").next(1) end, desc = "Review: next thread (unread first)" },
     { "[r", function() require("review_notes").next(-1) end, desc = "Review: previous thread" },
   },
@@ -133,6 +132,7 @@ from the left to fit.
 | `a`       | approve proposed comments                                    |
 | `d`       | discard unpublished text (asks before deleting new threads)  |
 | `R`       | mark read                                                    |
+| `t`       | make private (never published) / public                      |
 | `p`       | pull (sends nothing)                                         |
 | `P`       | publish: summary, confirm, send                              |
 | `n`       | new thread on the whole change                               |
@@ -143,8 +143,8 @@ from the left to fit.
 | `q`       | close the sidebar                                            |
 | `?`       | every key, to read or run (see below)                        |
 
-`x`, `a`, `d` and `R` also take a visual selection: `Vjjx` resolves three
-threads.
+`x`, `a`, `d`, `R` and `t` also take a visual selection: `Vjjx` resolves
+three threads. To find a thread, search the list with `/`.
 
 ### Thread mode
 
@@ -158,6 +158,7 @@ here. The bottom bar shows where you are in the list (`2 unread  3 of 19`).
 | `x`        | resolve / reopen                                      |
 | `a`        | approve the proposed comment                          |
 | `d`        | discard my unpublished text (asks for a new thread, which goes entirely) |
+| `t`        | make private (never published) / public               |
 | `]t` `[t`  | next / previous thread (the list's order)             |
 | `]u` `[u`  | next / previous unread                                |
 | `o`        | go to the code                                        |
@@ -204,10 +205,12 @@ its most urgent state on the last line. `signs = false` hides them.
 
 The composer is a small markdown float: `<C-s>` or `:w` saves into the notes
 file (nothing is sent), `q` closes. Saving again edits your pending comment;
-saving it empty removes it. `<C-t>` switches between a comment for the MR and
-a note for the agent (the title says which). It starts as a note on a
-local-only thread (and stays one), and on a new thread while the branch has
-no MR.
+saving it empty removes it. `<C-t>` switches between public (published with
+the MR) and private (never published; the title says so). It starts private
+on a private thread (and stays so), and on a new thread while the branch has
+no MR. `t` in the sidebar switches it later: on a new thread it makes the
+whole thread private or public, on a published one it switches your reply
+not sent yet.
 
 ### Commands
 
@@ -267,8 +270,8 @@ have not published.
   whether to move the review to it, and says which threads leave the notes
   (they stay on the old MR) and which of yours publish as new threads.
 - **Proposed** comments are not sent, and neither is the resolve of a thread
-  while it has one, so approving takes a single step. **Notes** are never
-  sent.
+  while it has one, so approving takes a single step. **Private** comments
+  are never sent.
 - **Checkpoints.** Publish records the commit you published at, and pi's
   `/fixup` the commit it started from, as refs (`refs/review-notes/<branch>/
   publish`, `.../fixup`). `f` then offers them as diff bases next to the MR
@@ -313,9 +316,10 @@ Matches the studio default, I added a comment above the constant.
 - `status: open|resolved` follows. A difference with the remote's status
   (kept in the sidecar) is a resolve or reopen not published yet.
 - `### @author` is a remote comment (`mine` marks my own), `### me (local)`
-  is mine and not published, `### me (note)` is mine for the agent (never
-  published), `### me (proposed)` is a tool's, waiting for
-  approval. A thread whose first comment is a note is local only. Body lines that start with `#` are written with a leading `\`.
+  is mine and not published, `### me (private)` is mine and never published
+  (`me (note)`, its old name, is still read), `### me (proposed)` is a
+  tool's, waiting for approval. A thread whose first comment is private is
+  private as a whole. Body lines that start with `#` are written with a leading `\`.
 - Plain text under a `##` heading with no `###` is read as one local
   comment, so a hand-written thread works.
 - `<branch>.json` next to it keeps the remote ids and what you have seen. It
@@ -418,21 +422,10 @@ require("review_notes").setup({
   repository for git-lab); anything else is an error. A command stopped by
   `timeout` counts as unreachable.
 
-## Finder
+## Items API
 
-`require("review_notes.snacks")` is a [snacks.nvim](https://github.com/folke/snacks.nvim)
-source to jump to a thread of the current review from anywhere. It searches
-the whole conversation, not only the last comment. `open()` opens it; to list
-it among your pickers, register `source`:
-
-```lua
-picker = { sources = { review_notes = require("review_notes.snacks").source } }
-```
-
-`<CR>` shows the thread in the sidebar, `<a-o>` goes to the code. Acting on
-threads is the sidebar's job, so there are no other keys.
-
-For another picker, `require("review_notes").items(buf)` returns every thread
+There is no finder: search the list with `/`. To build your own,
+`require("review_notes").items(buf)` returns every thread
 of the buffer's review, urgent first. Each item has `file`, `line`,
 `end_line`, `kind` (`change`, `file` or `line`), `anchor`, `state`, `icon`,
 `hl`, `tags`, `who`, `summary`, `thread` (the conversation as markdown lines,
@@ -442,9 +435,8 @@ file.
 
 - `open_item(item)` shows the thread in the sidebar and its code in the code
   window, and marks it seen.
-- `goto_item(item)` does the same and goes to the code (`o` in the list,
-  `<a-o>` in the finder).
-- `item_action(item, "resolve" | "read" | "approve" | "discard")` acts without
+- `goto_item(item)` does the same and goes to the code (`o` in the list).
+- `item_action(item, "resolve" | "read" | "approve" | "discard" | "toggle_private")` acts without
   leaving your picker. Refresh its items afterwards.
 
 ## Statusline
@@ -526,7 +518,7 @@ same notes files:
   is still missing.
 - `/fixup [scope]` is for your own branch (it refuses on a peer's MR, from
   the MR's `author`). It goes through the open threads that are its turn,
-  most severe first: those whose last word is a note of yours, or your
+  most severe first: those whose last word is a private comment of yours, or your
   unpublished comment before the MR, or a peer's comment on your MR. Your
   published reply last means the thread waits for the peer, so pi leaves it
   alone. It treats each by the tag it was filed with:

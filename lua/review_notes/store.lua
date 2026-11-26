@@ -20,7 +20,7 @@
 --   ### me (proposed)                   written by a tool, waits for approval
 --   Matches the studio default.
 --
---   ### me (note)                       mine, for the agent: never published
+--   ### me (private)                    mine, never published (for me and agents)
 --   keep the constant, document it
 --
 -- `## <anchor> {attrs}` starts a thread, `### <who> {attrs}` a comment. Attrs
@@ -28,12 +28,13 @@
 -- `moved`. A thread without `id` is new. A body line that starts with `#` is
 -- written with a leading `\`. A thread with text but no `###` section is read
 -- as one local comment, so a hand-written thread works. A thread whose first
--- comment is a note is local only: publish never sends any of it.
+-- comment is private is private: publish never sends any of it. `me (note)`,
+-- the old name of `me (private)`, is still read.
 local M = {}
 
 local uv = vim.uv or vim.loop
 
----@alias review_notes.Source "remote"|"local"|"proposed"|"note"
+---@alias review_notes.Source "remote"|"local"|"proposed"|"private"
 
 ---@class review_notes.Anchor
 ---@field path string? nil for the whole change
@@ -147,7 +148,8 @@ local function parse_comment(heading, body)
   local who, attrs = split_attrs(heading)
   local c = { source = "remote", body = body_of(body) }
   local mine = who:match("^me%s*%((%a+)%)$")
-  if mine == "local" or mine == "proposed" or mine == "note" then
+  if mine == "note" then mine = "private" end
+  if mine == "local" or mine == "proposed" or mine == "private" then
     c.source = mine
   elseif who == "me" then
     c.source = "local"

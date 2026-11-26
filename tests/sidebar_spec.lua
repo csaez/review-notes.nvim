@@ -157,7 +157,7 @@ describe("sidebar, thread mode", function()
     assert.truthy(bar(w):find("d discard", 1, true))
   end)
 
-  it("items search the whole conversation, for the finder", function()
+  it("items search the whole conversation, for the items API", function()
     local text = vim.tbl_filter(function(i) return i.key == "t1" end, review.items())[1].text
     assert.truthy(text:find("@al why?", 1, true))
     assert.truthy(table.concat(thread.lines(review.items()[1]), "\n"):find("^# ", 1))

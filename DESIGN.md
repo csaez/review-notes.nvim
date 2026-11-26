@@ -22,7 +22,7 @@ keymaps and options is not a goal; the notes file format stays.
 - **The notes file is for humans and agents.** Plain markdown, greppable,
   safe to hand-edit. Machine state lives elsewhere.
 - **Fits the existing workflow.** gitsigns for hunks and the review diff,
-  a picker to fuzzy-find. The sidebar links to them (changed files, diff
+  `/` in the list to find a thread. The sidebar links to them (changed files, diff
   base) through hooks; it does not replace them.
 
 ## Concepts
@@ -44,9 +44,10 @@ Each comment is exactly one of:
 - **local**: written here, not published. Editable and deletable.
 - **proposed**: a local comment written by a tool (pi). It is not published
   until I approve it.
-- **note**: mine, for the agent only. Never published.
+- **private**: mine, never published: for me and the agent, not for peers.
+  Written `me (private)`; `me (note)` is its old name, still read.
 
-A thread has at most one local, note or proposed comment at the end (my
+A thread has at most one local, private or proposed comment at the end (my
 reply). A new thread is a thread whose first comment is local. That is the
 whole model of "unsent": a thread with a trailing local comment, or a status
 change not published yet (`resolved` locally differs from the remote status).
@@ -54,20 +55,23 @@ change not published yet (`resolved` locally differs from the remote status).
 ### The two loops
 
 The notes carry two conversations: with peers, through the remote, and with
-the agent, never published. A note keeps the second out of the first.
+the agent, never published. A private comment keeps the second out of the
+first. "Private" is about publishing, not about who reads it: the agent
+reads everything in the notes file.
 
-- A thread whose first comment is a note is **local only**: publish sends
-  none of it (replies, resolve), and it never counts as unsent. Replies on
-  it are notes too.
+- A thread whose first comment is private is **private** as a whole:
+  publish sends none of it (replies, resolve), and it never counts as
+  unsent. Replies on it are private too.
 - **Approve** means "send it" on a thread that publishes, and "agreed" on a
-  local-only one: the proposed text becomes a note. While the review is
-  **private** (a branch with no MR yet), approving an agent's finding (a new
-  thread it started) also makes it a note, and the composer starts new
-  threads as notes. Once there is an MR, approve sends, as before; a note
-  (`<C-t>` in the composer) is how I say "agreed, keep it between us".
+  private one: the proposed text becomes private. **Before the MR** (a
+  branch with no MR yet), approving an agent's finding (a new thread it
+  started) also makes it private, and the composer starts new threads
+  private. Once there is an MR, approve sends, as before; making it private
+  (`<C-t>` in the composer, `t` in the sidebar) is how I say "agreed, keep
+  it between us".
 - **Whose turn** (the agent's rule, in the pi extension): a thread is the
   agent's when it is open and the last comment that is not the agent's is
-  a note, or my unpublished comment before the MR, or a peer's comment on
+  a private comment, or my unpublished comment before the MR, or a peer's comment on
   my own MR. My published reply last waits for the peer. Fixup plays the
   author, so it refuses on a peer's MR (the MR's `author` against `me`).
 
@@ -128,7 +132,7 @@ Publish is always explicit.
 2. The summary lists: new threads, replies, resolves and reopens, and
    proposed comments that are not approved (skipped). While a thread has a
    proposed comment, its status change is held too, so approving is one
-   step. Notes and local-only threads are never in it. It warns when my
+   step. Private comments and private threads are never in it. It warns when my
    checkout differs from the MR's head (`sha`): behind (line comments may be
    refused) or commits not pushed (replies may point at code peers cannot
    see). The plugin never pushes or updates; it only says so.
@@ -258,6 +262,7 @@ Resolved (4)  ...
 | `A`     | approve every proposed comment                                |
 | `D`     | discard every proposed comment                                |
 | `R`     | mark read (the thread or selection under the cursor)          |
+| `t`     | make private / public (the thread or selection under the cursor) |
 | `m`     | MR actions (hooks, see below): approve the MR, open in the browser |
 | `f`     | changed files (hook: the user's diff picker)                  |
 | `e`     | edit the notes file (in the code window)                      |
@@ -300,12 +305,16 @@ cursor. Moving (`]t`, `]u`) is thread mode's; `q` steps back one level
 | `x`  | resolve / reopen; acknowledges "resolved by @bob" when unseen |
 | `a`  | approve the proposed comment                                 |
 | `d`  | discard my unpublished text (a new thread disappears)        |
+| `t`  | make private (never published) / public                      |
 | `o`  | go to the code                                               |
 | `q`  | back one level: thread to list, list closes the sidebar      |
 | `?`  | every key, to read or run                                    |
 
-`x`, `a`, `d` act at once (they are local until publish); `d` asks when it
-would delete a whole new thread.
+`x`, `a`, `d`, `t` act at once (they are local until publish); `d` asks
+when it would delete a whole new thread. `t` is the composer's `<C-t>`
+after the fact: on a new thread it switches the first comment, so the
+thread becomes private or public; on a published one, my reply not
+sent yet. It does nothing in a document's review, which never publishes.
 
 ### MR hooks
 
@@ -355,7 +364,6 @@ Global keys the README suggests (the plugin sets none):
 | `<leader>rt` | the thread at the cursor in the sidebar (a menu if several) |
 | `<leader>rn` | new thread on the line, or the visual range              |
 | `<leader>rN` | new thread on the whole change                           |
-| `<leader>rf` | the finder                                               |
 | `]r` / `[r`  | next / previous unread across the review (in the sidebar); with nothing unread, the next thread in the buffer |
 
 `<leader>rn` always starts a new thread, even on a line that has one;
@@ -374,19 +382,12 @@ replies are `r` in the sidebar.
 Everything else is a key in the sidebar, or a Lua function
 (`require("review_notes").actions`).
 
-## The finder
+## Finding a thread
 
-A way to jump to a thread from anywhere, not a place to act on threads: the
-sidebar is that. The plugin ships a snacks source
-(`require("review_notes.snacks").source`) so user config is one line.
-
-- It searches the anchor, the tags and the whole conversation, not only the
-  last comment, which the list cannot do.
-- The preview is the thread as thread mode shows it.
-- `<CR>` shows the thread in the sidebar (opening it when needed), with the
-  code window following; `<a-o>` goes to the code. No other keys.
-
-`items(buf)` stays the API for other pickers.
+No picker: the list is home, and `/` in it finds a thread by anchor, tag,
+author or the last comment's first line. A finder that searched the whole
+conversation duplicated the list without its keys. `items(buf)` stays the
+API for anyone who wants one.
 
 ## Writing
 
@@ -453,9 +454,9 @@ Rules:
 - `status: open|resolved` is the first line of the thread; the remote status
   is in the sidecar, so a difference between the two means "resolve or reopen
   is not published yet".
-- `### @author` is a remote comment, `### me (local)`, `### me (note)` and
-  `### me (proposed)` are mine. A thread whose first comment is a note is
-  local only. Body is everything up to the next heading.
+- `### @author` is a remote comment, `### me (local)`, `### me (private)` and
+  `### me (proposed)` are mine. A thread whose first comment is private is
+  private as a whole. Body is everything up to the next heading.
   Body lines starting with `#` are escaped on write.
 - Agents add a thread or a reply by appending a section with
   `### me (proposed)`, and need no other knowledge of the format. The
@@ -497,11 +498,9 @@ The git-lab script in `extras/` implements it for GitLab.
 | `thread.lua`      | thread mode: drawing, hint bar, thread keys, list order    |
 | `signs.lua`       | anchors (extmarks) and signs in code buffers               |
 | `compose.lua`     | the composer float                                         |
-| `snacks.lua`      | the finder, a snacks picker source                         |
 | `init.lua`        | setup, commands, public API (thin)                         |
 
-`actions` is the one place a verb lives; the sidebar and the finder bind
-keys to it. Every change goes through `review.edit`, which tells the
+`actions` is the one place a verb lives; the sidebar binds keys to it. Every change goes through `review.edit`, which tells the
 listeners (code signs, the sidebar), so nothing refreshes by hand.
 
 `merge.lua` and `store.lua` have no Neovim dependencies, so most of the

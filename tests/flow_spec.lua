@@ -359,7 +359,7 @@ describe("pull and publish", function()
     review.config.backend.threads = cmd("threads-mr", "--mr={mr}")
     store.update(notes_path, function(d)
       table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "local", body = "x" } } })
-      table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "note", body = "for pi" } } })
+      table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "private", body = "for pi" } } })
     end)
     local prompt
     vim.ui.select = function(items, o, cb) prompt = o.prompt cb(items[1]) end

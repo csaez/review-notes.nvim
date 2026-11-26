@@ -39,16 +39,16 @@ end
 ---@param thread review_notes.Thread
 ---@return boolean
 function M.has_unpublished(thread)
-  return has_source(thread, "local") or has_source(thread, "proposed") or has_source(thread, "note")
+  return has_source(thread, "local") or has_source(thread, "proposed") or has_source(thread, "private")
 end
 
---- A thread that never leaves the notes: it was started with a note (for the
---- agent), so publish sends none of it.
+--- A private thread never leaves the notes: it was started with a private
+--- comment, so publish sends none of it.
 ---@param thread review_notes.Thread
 ---@return boolean
-function M.local_only(thread)
+function M.is_private(thread)
   local first = thread.comments[1]
-  return thread.id == nil and first ~= nil and first.source == "note"
+  return thread.id == nil and first ~= nil and first.source == "private"
 end
 
 --- A fingerprint of a comment's text, to notice it was edited after I saw it.
@@ -136,7 +136,7 @@ end
 ---@field resolved_by string? set while someone else's resolve is unseen
 ---@field new boolean the thread does not exist on the remote yet
 ---@field orphan boolean
----@field local_only boolean a thread for the agent, never published
+---@field is_private boolean a private thread: never published
 
 --- Everything a view needs to know about a thread's state.
 ---@param thread review_notes.Thread
@@ -147,13 +147,13 @@ function M.flags(thread, state)
   return {
     unread = M.is_unread(thread, state),
     proposed = has_source(thread, "proposed"),
-    unsent = (has_source(thread, "local") and not M.local_only(thread))
+    unsent = (has_source(thread, "local") and not M.is_private(thread))
       or (thread.id ~= nil and state ~= nil and thread.status ~= state.status),
     resolved = thread.status == "resolved",
     resolved_by = unseen and state and state.resolved_by or nil,
     new = thread.id == nil or thread.orphan == true,
     orphan = thread.orphan == true,
-    local_only = M.local_only(thread),
+    is_private = M.is_private(thread),
   }
 end
 
@@ -309,7 +309,7 @@ end
 function M.plan(doc, side)
   local plan = { items = {}, held = {} }
   for _, t in ipairs(doc.threads) do
-    if M.local_only(t) then goto continue end
+    if M.is_private(t) then goto continue end
     local id = not t.orphan and t.id or nil
     local state = id and side.threads[id] or nil
     local stale = state ~= nil and M.unread_count(t, state) > 0
@@ -399,16 +399,16 @@ end
 
 --- Turn the proposed comments of a thread into mine. On a thread that
 --- publishes, approving means "send it": they become local comments. On a
---- local-only thread it means "agreed": they become notes. So does it on a
---- finding (a new thread a tool started) while *private*: the review has no
---- MR yet.
+--- private thread it means "agreed": they become private comments. So does
+--- it on a finding (a new thread a tool started) while *pre_mr*: the review
+--- has no MR yet.
 ---@param thread review_notes.Thread
----@param private boolean?
+---@param pre_mr boolean?
 ---@return integer approved
-function M.approve(thread, private)
+function M.approve(thread, pre_mr)
   local first = thread.comments[1]
   local finding = thread.id == nil and first ~= nil and first.source == "proposed"
-  local to = (M.local_only(thread) or (private and finding)) and "note" or "local"
+  local to = (M.is_private(thread) or (pre_mr and finding)) and "private" or "local"
   local n = 0
   for _, c in ipairs(thread.comments) do
     if c.source == "proposed" then

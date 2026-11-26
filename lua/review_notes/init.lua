@@ -234,7 +234,7 @@ end
 M.goto_item = thread.go_to
 
 ---@param item review_notes.Item
----@param action "resolve"|"read"|"approve"|"discard"
+---@param action "resolve"|"read"|"approve"|"discard"|"toggle_private"
 function M.item_action(item, action)
   actions[action](item.ctx, item.key)
 end

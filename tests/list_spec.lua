@@ -74,6 +74,37 @@ describe("sidebar, list mode", function()
     assert.are.equal(-1, vim.fn.foldclosed(unread))
   end)
 
+  it("t makes a thread private or public", function()
+    local function sources(body)
+      for _, t in ipairs(doc().threads) do
+        if t.comments[1].body == body then
+          return vim.tbl_map(function(c) return c.source end, t.comments)
+        end
+      end
+    end
+    -- Nothing of mine on a remote thread: no hint, nothing changes.
+    on("why?")
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
+    assert.is_nil(bar():find("t make", 1, true))
+    press("t")
+    assert.are.same({ "remote" }, sources("why?"))
+    -- A new thread of mine becomes private, and back.
+    store.update(notes_path, function(d)
+      table.insert(d.threads, { anchor = { path = "a.c" }, status = "open", comments = { { source = "local", body = "mine here" } } })
+    end)
+    require("review_notes.review").changed()
+    on("mine here")
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
+    assert.truthy(bar():find("t make private", 1, true))
+    press("t")
+    assert.are.same({ "private" }, sources("mine here"))
+    on("mine here")
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
+    assert.truthy(bar():find("t make public", 1, true))
+    press("t")
+    assert.are.same({ "local" }, sources("mine here"))
+  end)
+
   it("opens beside the code, which keeps its window", function()
     local wins = vim.api.nvim_tabpage_list_wins(0)
     assert.are.equal(2, #wins)

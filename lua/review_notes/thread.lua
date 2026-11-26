@@ -47,7 +47,7 @@ end
 -- Drawing ---------------------------------------------------------------------
 
 --- The thread as thread mode shows it: a heading, the status line (line 2,
---- highlighted with `item.hl`), the conversation. The finder's preview too.
+--- highlighted with `item.hl`), the conversation. A picker's preview too.
 ---@param item review_notes.Item
 ---@return string[]
 function M.lines(item)
@@ -145,6 +145,9 @@ KEYS = {
     fn = function() with_item(function(i) actions.approve_items({ i }) end) end },
   { lhs = "d", group = "Thread", desc = "discard my unpublished text (a new thread goes entirely)", hint = when("discard", actions.can_discard),
     fn = function() with_item(function(i) actions.discard_items({ i }) end) end },
+  { lhs = "t", group = "Thread", desc = "make private (never published) / public",
+    hint = when(function(i) return "make " .. actions.private_verb(i) end, actions.can_toggle_private),
+    fn = function() with_item(function(i) actions.toggle_private(i.ctx, i.key) end) end },
   { lhs = "o", group = "Thread", desc = "go to the code", hint = when("code", function(i) return i.has_code end),
     fn = function() with_item(function(i) sidebar.show_code(i, true) end) end },
   { lhs = "]t", group = "Move", desc = "next thread", hint = "next", fn = function() step(1) end },
