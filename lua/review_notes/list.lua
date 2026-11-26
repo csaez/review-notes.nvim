@@ -1,18 +1,19 @@
--- The home: one buffer for the whole review, like fugitive's `:G`. A header
--- with the branch, the MR and the counts, then the threads in sections by
--- urgency (each a fold). The thread keys of the panel work on the thread
--- under the cursor (or a visual selection), and the review-wide keys live
--- here: pull, publish, approve or discard all proposed, the MR actions.
+-- List mode of the sidebar: the whole review. A header with the branch, the
+-- MR and the counts, then the threads in sections by urgency (each a fold).
+-- The thread keys work on the thread under the cursor (or a visual
+-- selection), and the review-wide keys live here: pull, publish, approve or
+-- discard all proposed, the MR actions.
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local config = require("review_notes.config")
 local backend = require("review_notes.backend")
 local thread = require("review_notes.thread")
+local sidebar = require("review_notes.sidebar")
 local sync = require("review_notes.sync")
 
 local M = {}
 
-local ns = vim.api.nvim_create_namespace("review_notes_home")
+local ns = vim.api.nvim_create_namespace("review_notes_list")
 
 local SECTIONS = {
   { state = "unread", title = "Unread" },
@@ -24,7 +25,7 @@ local SECTIONS = {
 
 local HELP = {
   "Threads (on the line under the cursor, or a visual selection):",
-  "  <CR> show in the panel    o  go to the code",
+  "  <CR> show the thread      o  go to the code",
   "  r    reply                x  resolve / reopen",
   "  a    approve proposed     d  discard unpublished",
   "  R    mark read",
@@ -34,19 +35,21 @@ local HELP = {
   "  A    approve all proposed D  discard all proposed",
   "  m    merge request actions",
   "  f    changed files        e  edit the notes file",
-  "  <Tab> fold a section      q  close",
+  "  <Tab> fold a section      q  close the sidebar",
 }
 
----@class review_notes.HomeState
+---@class review_notes.ListState
 ---@field ctx review_notes.Context
 ---@field rows table<integer, review_notes.Item> thread by buffer line
 ---@field mr table? what `mr.info` printed
 ---@field mr_error string?
 ---@field folded table<string, boolean> by section state
----@field first boolean? the next draw puts the cursor on the first thread
+---@field want string|true|nil the next draw puts the cursor on this thread
+---  (true: the first one)
+---@field last string? the thread shown last, for the cursor when coming back
 
----@type table<integer, review_notes.HomeState> by buffer
-local homes = {}
+---@type table<integer, review_notes.ListState> by buffer
+local lists = {}
 
 local function notify(msg, level) review.notify(msg, level) end
 
@@ -66,7 +69,7 @@ end
 -- Drawing ---------------------------------------------------------------------
 
 local function draw(buf)
-  local h = homes[buf]
+  local h = lists[buf]
   if not h or not vim.api.nvim_buf_is_valid(buf) then return end
   -- Keep each window on its thread: rows move when the MR line arrives or a
   -- thread changes section.
@@ -90,24 +93,24 @@ local function draw(buf)
     if chunks then hls[#lines] = chunks end
   end
 
-  local head = "Review  " .. branch_of(h.ctx)
+  add("Review  " .. branch_of(h.ctx), { { 0, 6, "Title" } })
   if h.mr and h.mr.ref then
-    head = head .. "  " .. h.mr.ref .. (h.mr.target and (" -> " .. h.mr.target:gsub("^origin/", "")) or "")
+    local target = h.mr.target and (" -> " .. h.mr.target:gsub("^origin/", "")) or ""
+    add(h.mr.ref .. target .. (h.mr.title and ("  " .. h.mr.title) or ""), { { #h.mr.ref + #target, -1, "Comment" } })
   end
-  add(head, { { 0, 6, "Title" } })
-  if h.mr and h.mr.title then add("  " .. h.mr.title, { { 0, -1, "Comment" } }) end
-  if h.mr_error then add("  MR: " .. h.mr_error, { { 0, -1, "DiagnosticWarn" } }) end
+  if h.mr_error then add("MR: " .. h.mr_error, { { 0, -1, "DiagnosticWarn" } }) end
   local parts = {}
   for _, s in ipairs(SECTIONS) do
     if (counts[s.state] or 0) > 0 then table.insert(parts, ("%d %s"):format(counts[s.state], s.title:lower())) end
   end
-  add((#parts > 0 and table.concat(parts, "  ") or "no threads") .. "    " .. ago(sync.pulled_at[h.ctx.path]),
-    { { 0, -1, "Comment" } })
+  add(#parts > 0 and table.concat(parts, "  ") or "no threads", { { 0, -1, "Comment" } })
+  add(ago(sync.pulled_at[h.ctx.path]), { { 0, -1, "Comment" } })
   add("")
 
+  -- The sidebar is narrow: anchors longer than this are cut from the left.
   local width = 0
   for _, item in ipairs(items) do width = math.max(width, #item.anchor) end
-  width = math.min(width, 48)
+  width = math.min(width, 28)
 
   for _, s in ipairs(SECTIONS) do
     local list = by_state[s.state]
@@ -136,7 +139,7 @@ local function draw(buf)
       add("")
     end
   end
-  add("<CR> show  r reply  x resolve  a approve  d discard  p pull  P publish  m MR  g? help", { { 0, -1, "Comment" } })
+  while lines[#lines] == "" do table.remove(lines) end
 
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -152,26 +155,24 @@ local function draw(buf)
     end
   end
   h.rows = rows
+  local first_row = math.huge
+  for lnum in pairs(rows) do first_row = math.min(first_row, lnum) end
+  if first_row == math.huge then first_row = 1 end
   for win, k in pairs(keep) do
-    local target = math.min(k.lnum, #lines)
+    local want = h.want or k.key
+    local target = want == true and first_row or math.min(k.lnum, #lines)
     for lnum, item in pairs(rows) do
-      if item.key == k.key then target = lnum end
-    end
-    if not k.key and h.first then
-      -- Opened before anything was drawn: the first thread.
-      target = math.huge
-      for lnum in pairs(rows) do target = math.min(target, lnum) end
-      if target == math.huge then target = 1 end
+      if item.key == want then target = lnum end
     end
     vim.api.nvim_win_set_cursor(win, { target, 0 })
   end
-  h.first = nil
+  if next(keep) then h.want = nil end
 
   -- Folds: each section header and its rows. Manual folds, redone on every
   -- draw; a fold the user opened or closed keeps its state by section.
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     vim.api.nvim_win_call(win, function()
-      vim.wo[win].foldmethod = "manual"
+      vim.wo[win][0].foldmethod = "manual"
       vim.cmd("silent! normal! zE")
       for _, f in ipairs(folds) do
         if f[2] > f[1] then
@@ -186,8 +187,8 @@ local function draw(buf)
 end
 
 local function redraw_all()
-  for buf in pairs(homes) do
-    if vim.api.nvim_buf_is_valid(buf) then draw(buf) else homes[buf] = nil end
+  for buf in pairs(lists) do
+    if vim.api.nvim_buf_is_valid(buf) then draw(buf) else lists[buf] = nil end
   end
 end
 
@@ -204,7 +205,7 @@ local function selected(buf)
   end
   local out = {}
   for l = first, last do
-    if homes[buf].rows[l] then table.insert(out, homes[buf].rows[l]) end
+    if lists[buf].rows[l] then table.insert(out, lists[buf].rows[l]) end
   end
   if #out == 0 then notify("no thread on this line") end
   return out
@@ -222,12 +223,12 @@ end
 -- MR ------------------------------------------------------------------------------
 
 local function load_mr(buf)
-  local h = homes[buf]
+  local h = lists[buf]
   local mr = config.values.mr
   if not (mr and mr.info) or h.ctx.kind ~= "git" then return end
   backend.async(function()
     local r = backend.run({ info = mr.info }, "info", { root = h.ctx.root })
-    if not homes[buf] then return end
+    if not lists[buf] then return end
     if r.ok and type(r.json) == "table" then
       h.mr, h.mr_error = r.json, nil
     else
@@ -238,12 +239,12 @@ local function load_mr(buf)
 end
 
 local function info(buf)
-  local h = homes[buf]
+  local h = lists[buf]
   return { ctx = h.ctx, mr = h.mr }
 end
 
 local function run_mr_action(buf, a)
-  local h = homes[buf]
+  local h = lists[buf]
   if a.fn then return a.fn(h.mr or {}, info(buf)) end
   if not a.cmd then return end
   local function go(input)
@@ -280,7 +281,7 @@ local function mr_menu(buf)
   local list = mr and mr.actions or {}
   if #list == 0 then return notify("no merge request actions configured (`mr.actions`)") end
   vim.ui.select(list, {
-    prompt = "Merge request" .. (homes[buf].mr and (" " .. (homes[buf].mr.ref or "")) or ""),
+    prompt = "Merge request" .. (lists[buf].mr and (" " .. (lists[buf].mr.ref or "")) or ""),
     format_item = function(a) return a.key .. "  " .. a.desc end,
   }, function(a) if a then run_mr_action(buf, a) end end)
 end
@@ -292,19 +293,19 @@ local function set_keys(buf)
     vim.keymap.set(modes or "n", lhs, fn, { buffer = buf, nowait = true, desc = desc })
   end
   local nx = { "n", "x" }
-  local h = homes[buf]
+  local h = lists[buf]
 
   map("<CR>", function()
     local item = one(buf)
-    if item then thread.show(item.ctx, item.key, { reorder = true }) end
-  end, "show in the panel")
+    if item then thread.show(item.ctx, item.key, { reorder = true, focus = "sidebar" }) end
+  end, "show the thread")
   map("o", function()
     local item = one(buf)
     if item then thread.go_to(item) end
   end, "go to the code")
   map("r", function()
     local item = one(buf)
-    if item then actions.reply(item.ctx, item.entry) end
+    if item then actions.reply(item.ctx, item.entry, sidebar.win()) end
   end, "reply")
   map("x", each(buf, actions.resolve), "resolve / reopen", nx)
   map("a", function() actions.approve_items(selected(buf)) end, "approve proposed", nx)
@@ -321,7 +322,7 @@ local function set_keys(buf)
     if config.values.files then return config.values.files(info(buf)) end
     notify("no `files` function configured")
   end, "changed files")
-  map("e", function() vim.cmd("edit " .. vim.fn.fnameescape(h.ctx.path)) end, "edit the notes file")
+  map("e", function() sidebar.edit(h.ctx.path) end, "edit the notes file")
   map("<Tab>", function()
     local lnum = vim.api.nvim_win_get_cursor(0)[1]
     local start = vim.fn.foldclosed(lnum)
@@ -334,61 +335,82 @@ local function set_keys(buf)
     end
     vim.cmd("silent! normal! za")
   end, "fold section")
-  map("q", function() M.close(buf) end, "close")
+  map("q", sidebar.close, "close the sidebar")
   map("g?", function() notify(table.concat(HELP, "\n")) end, "help")
 end
 
 -- Opening -----------------------------------------------------------------------------
 
---- Open the home of *ctx* (default: the current buffer's review) in the
---- current window. A second call goes back to the same buffer.
+---@param ctx review_notes.Context
+---@return integer buf
+local function ensure_buf(ctx)
+  local name = "reviewnotes://review/" .. ctx.path
+  local buf = vim.fn.bufnr(name)
+  if buf ~= -1 and lists[buf] then return buf end
+  buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(buf, name)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "hide"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = "reviewlist"
+  lists[buf] = { ctx = ctx, rows = {}, folded = {}, want = true }
+  review.bind(buf, ctx)
+  sidebar.register(buf)
+  set_keys(buf)
+  vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, callback = function()
+    lists[buf] = nil
+    review.bind(buf, nil)
+  end })
+  -- Also on entering: the list is where I go to see what is new.
+  vim.api.nvim_create_autocmd("BufEnter", { buffer = buf, callback = function() sync.auto_pull(ctx) end })
+  review.watch(ctx.path)
+  load_mr(buf)
+  return buf
+end
+
+---@class review_notes.ListOpts
+---@field key string? put the cursor on this thread (default: the one shown last)
+---@field focus boolean? move the cursor into the sidebar (default true)
+
+--- Show the list of *ctx* (default: the current buffer's review) in the
+--- sidebar, opening it when needed.
 ---@param ctx review_notes.Context?
-function M.open(ctx)
+---@param opts review_notes.ListOpts?
+function M.open(ctx, opts)
   ctx = ctx or review.context()
   if not ctx then return notify("not in a review (no git repository here)") end
-  local name = "reviewnotes://home/" .. ctx.path
-  local buf = vim.fn.bufnr(name)
-  if buf == -1 or not homes[buf] then
-    buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(buf, name)
-    vim.bo[buf].buftype = "nofile"
-    vim.bo[buf].bufhidden = "hide"
-    vim.bo[buf].swapfile = false
-    vim.bo[buf].filetype = "reviewhome"
-    homes[buf] = { ctx = ctx, rows = {}, folded = {} }
-    review.bind(buf, ctx)
-    set_keys(buf)
-    vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, callback = function()
-      homes[buf] = nil
-      review.bind(buf, nil)
-    end })
-    -- Also on opening: the home is where I go to see what is new.
-    vim.api.nvim_create_autocmd("BufEnter", { buffer = buf, callback = function() sync.auto_pull(ctx) end })
-    review.watch(ctx.path)
-    load_mr(buf)
-  end
-  vim.api.nvim_win_set_buf(0, buf)
-  local wo = vim.wo[0]
-  wo.number, wo.relativenumber, wo.signcolumn, wo.wrap = false, false, "no", false
-  wo.foldcolumn, wo.statuscolumn = "0", ""
-  wo.cursorline = true
-  wo.foldtext = "v:lua.require'review_notes.home'.foldtext()"
-  wo.fillchars = "fold: "
-  -- On the first thread, so <CR> works at once.
-  homes[buf].first = true
+  opts = opts or {}
+  local buf = ensure_buf(ctx)
+  local h = lists[buf]
+  h.want = opts.key or h.last or h.want
+  sidebar.show(buf, {
+    focus = opts.focus ~= false,
+    wo = {
+      wrap = false,
+      cursorline = true,
+      foldtext = "v:lua.require'review_notes.list'.foldtext()",
+      fillchars = "fold: ",
+      winbar = "",
+    },
+  })
   draw(buf)
 end
 
---- Leave the home: back to the previous buffer, or close the window.
----@param buf integer
-function M.close(buf)
-  local alt = vim.fn.bufnr("#")
-  if alt ~= -1 and alt ~= buf and vim.api.nvim_buf_is_valid(alt) and vim.bo[alt].buflisted then
-    vim.api.nvim_win_set_buf(0, alt)
-  elseif #vim.api.nvim_tabpage_list_wins(0) > 1 then
-    vim.api.nvim_win_close(0, false)
-  else
-    vim.cmd("enew")
+--- Toggle: open the list of *ctx*, or close the sidebar when the cursor is
+--- already in it.
+---@param ctx review_notes.Context?
+function M.toggle(ctx)
+  local win = sidebar.win()
+  if win and win == vim.api.nvim_get_current_win() then return sidebar.close() end
+  M.open(ctx)
+end
+
+--- Thread *key* of *ctx* is shown: the list's cursor goes there when it comes back.
+---@param ctx review_notes.Context
+---@param key string
+function M.follow(ctx, key)
+  for _, h in pairs(lists) do
+    if h.ctx.path == ctx.path then h.last = key end
   end
 end
 

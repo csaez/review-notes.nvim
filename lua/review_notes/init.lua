@@ -4,8 +4,8 @@
 --
 --   review   which review a buffer is in, reading and changing it
 --   actions  the verbs on threads, shared by every UI
---   home     the review's buffer (:Review)
---   sidebar  the window on the right; thread: one thread in it
+--   sidebar  the window on the right (:Review), in list or thread mode
+--   list     the whole review; thread: one thread
 --   signs    anchors and signs in code buffers
 --   sync     pull and publish
 --   store, merge, backend, compose: the file, the rules, the remote, the editor
@@ -20,7 +20,7 @@ local actions = require("review_notes.actions")
 local sync = require("review_notes.sync")
 local thread = require("review_notes.thread")
 local sidebar = require("review_notes.sidebar")
-local home = require("review_notes.home")
+local list_mode = require("review_notes.list")
 
 local M = {}
 
@@ -194,8 +194,12 @@ function M.next(dir)
   if sidebar.is_open() then thread.show(ctx, target.entry.key, { follow = false }) end
 end
 
---- The home of the current review: every thread, the review-wide actions.
-function M.home() home.open() end
+--- The sidebar with the list of the current review: every thread, the
+--- review-wide actions. Closes it when the cursor is in it.
+function M.toggle() list_mode.toggle() end
+
+--- Open the sidebar on the list of the current review, and go there.
+function M.open() list_mode.open() end
 
 --- Open the notes file, to edit by hand.
 function M.edit()
@@ -255,7 +259,7 @@ function M.publish() sync.publish() end
 -- Setup -------------------------------------------------------------------
 
 local commands = {
-  home = M.home,
+  toggle = M.toggle,
   pull = M.pull,
   publish = M.publish,
   edit = M.edit,
@@ -293,7 +297,7 @@ function M.setup(opts)
   })
   vim.api.nvim_create_user_command("Review", function(a)
     local name = a.args:match("^(%S*)")
-    if name == "" then name = "home" end
+    if name == "" then name = "toggle" end
     local fn = commands[name]
     if not fn then return notify("unknown subcommand: " .. name, vim.log.levels.ERROR) end
     fn()

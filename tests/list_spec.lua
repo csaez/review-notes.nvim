@@ -3,7 +3,7 @@ local sidebar = require("review_notes.sidebar")
 local thread = require("review_notes.thread")
 local store = require("review_notes.store")
 
-describe("home", function()
+describe("sidebar, list mode", function()
   local repo, notes_path
 
   local function doc() return store.parse(store.read_lines(notes_path)) end
@@ -46,7 +46,7 @@ describe("home", function()
     local select = vim.ui.select
     vim.ui.select = function(items, _, cb) cb(items[1]) end
     vim.g.restore_select = select
-    review.home()
+    review.open()
   end)
 
   after_each(function()
@@ -68,13 +68,42 @@ describe("home", function()
     assert.are.equal(-1, vim.fn.foldclosed(unread))
   end)
 
-  it("starts on the first thread, and <CR> shows it in the panel without leaving", function()
-    local home = vim.api.nvim_get_current_win()
+  it("opens beside the code, which keeps its window", function()
+    local wins = vim.api.nvim_tabpage_list_wins(0)
+    assert.are.equal(2, #wins)
+    assert.are.equal(sidebar.win(), vim.api.nvim_get_current_win())
+    local code = vim.tbl_filter(function(w) return w ~= sidebar.win() end, wins)[1]
+    assert.truthy(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(code)):match("a%.c$"))
+  end)
+
+  it("starts on the first thread, <CR> shows it in the same window and - comes back", function()
+    local win = vim.api.nvim_get_current_win()
     press("<CR>")
-    assert.is_true(sidebar.is_open())
     local _, key = thread.shown()
     assert.are.equal("t1", key)
-    assert.are.equal(home, vim.api.nvim_get_current_win())
+    assert.is_true(thread.is_shown())
+    assert.are.equal(win, vim.api.nvim_get_current_win())
+    assert.are.equal(2, #vim.api.nvim_tabpage_list_wins(0))
+    -- The code followed in the other window.
+    local code = sidebar.code_win()
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(code)[1])
+    press("]t")
+    local _, next_key = thread.shown()
+    press("-")
+    assert.is_false(thread.is_shown())
+    local shown = vim.tbl_filter(function(i) return i.key == next_key end, review.items())[1]
+    assert.truthy(vim.api.nvim_get_current_line():find(shown.summary, 1, true))
+  end)
+
+  it("toggles from inside, and o goes to the code", function()
+    review.toggle()
+    assert.is_false(sidebar.is_open())
+    review.toggle()
+    assert.is_true(sidebar.is_open())
+    on("why?")
+    press("o")
+    assert.are.equal(sidebar.code_win(), vim.api.nvim_get_current_win())
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
   end)
 
   it("approves a visual selection of proposed comments at once", function()

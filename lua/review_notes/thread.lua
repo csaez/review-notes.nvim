@@ -131,9 +131,9 @@ local function step(dir, unread)
   notify("nothing unread")
 end
 
+-- Required late: list mode requires this module.
 local function back_to_list()
-  local ok, list = pcall(require, "review_notes.list")
-  if ok and state.ctx then list.open(state.ctx, { key = state.key }) end
+  if state.ctx then require("review_notes.list").open(state.ctx, { key = state.key }) end
 end
 
 local function map(lhs, fn, desc)
@@ -195,8 +195,7 @@ function M.show(ctx, key, opts)
   if not item then return end
   if opts.follow ~= false then sidebar.show_code(item, opts.focus == "code") end
   if item.state == "unread" then actions.read(ctx, key) end
-  local ok, list = pcall(require, "review_notes.list")
-  if ok then list.follow(ctx, key) end
+  require("review_notes.list").follow(ctx, key)
 end
 
 --- Go to the code of *item* and show the thread in the sidebar. A thread
