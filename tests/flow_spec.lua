@@ -187,6 +187,25 @@ describe("pull and publish", function()
     vim.notify = notify
   end)
 
+  it("a repository that is not on GitLab pauses automatic pulls, with one short message", function()
+    local sync = require("review_notes.sync")
+    local ctx = require("review_notes.review").context()
+    review.config.backend.threads = cmd("notgitlab")
+    review.config.auto_pull = 0
+    local notify, msgs = vim.notify, {}
+    vim.notify = function(m) table.insert(msgs, m) end
+    sync.auto_pull(ctx)
+    wait_for(function() return sync.state(ctx).failing end, "first attempt")
+    sync.auto_pull(ctx)
+    vim.wait(300)
+    vim.notify = notify
+    assert.are.equal("no_remote", sync.state(ctx).kind)
+    assert.is_true(sync.state(ctx).paused)
+    assert.are.equal(1, #calls())
+    assert.are.equal(1, #msgs)
+    assert.truthy(msgs[1]:find("not a GitLab server", 1, true))
+  end)
+
   describe("with the MR in the thread list", function()
     local mr_file
     local function write_mr(mr, iid)

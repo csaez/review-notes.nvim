@@ -235,9 +235,9 @@ have not published.
   Automatic pulls keep retrying every `auto_pull` seconds; a hung request is
   stopped after `timeout` seconds. Publish pulls first, so it sends nothing
   while offline. Your notes are never touched by a failed pull.
-- **No access, no MR.** A pull that fails because the token has no access or
-  the branch has no MR pauses automatic pulls (retrying cannot help); `p`
-  checks again.
+- **No access, no MR, not GitLab.** A pull that fails because the token has
+  no access, the branch has no MR, or the repository is not on GitLab pauses
+  automatic pulls (retrying cannot help); `p` checks again.
 - **Approvals and reviewers.** The list's header says who reviews the MR and
   who approved it (`approved by @bo  reviewers: me, @bo`), refreshed by
   every pull, so a peer approving while you review shows up within
@@ -387,7 +387,8 @@ require("review_notes").setup({
   `approvals_left` (all optional) feed the header's review line and the
   "approved by a peer" warnings.
 - Exit status says why a command failed: 3 the remote is unreachable, 4 no
-  access, 5 no such MR; anything else is an error. A command stopped by
+  access, 5 no such MR, 6 the repository has no such remote (a GitHub
+  repository for git-lab); anything else is an error. A command stopped by
   `timeout` counts as unreachable.
 
 ## Finder
@@ -468,7 +469,8 @@ git-lab review submit            # publish pending draft comments
 It finds the project from the `origin` remote and the merge request from the
 current branch. Set `GITLAB_HOST` to override the host and `GITLAB_TIMEOUT`
 for the seconds per request (default 10). It exits 3 when GitLab is
-unreachable, 4 without access, 5 when there is no such MR. Run
+unreachable, 4 without access, 5 when there is no such MR, 6 when the
+remote is not a GitLab server. Run
 `git-lab --help` for everything.
 
 `mr list` prints one MR per line, starting with its reference, so a picker

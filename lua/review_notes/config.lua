@@ -12,7 +12,8 @@ local M = {}
 ---  `{path}`, `{line}`, `{thread}` and `{ids}` are substituted; text goes on stdin.
 ---  `{mr}` is the IID of the merge request the review is on (what `threads`
 ---  reported); an argument holding it is left out while none is known.
----  Exit status 3 means the remote is unreachable, 4 no access, 5 no such MR.
+---  Exit status 3 means the remote is unreachable, 4 no access, 5 no such MR,
+---  6 the repository has no such remote (not a GitLab project).
 ---    threads    prints [{id, path, line, resolved, comments = [{id, author, body}]}],
 ---               or {mr = {iid, ref, state, url, successor}, threads = [...]}:
 ---               state "merged" or "closed" stops automatic pulls, successor

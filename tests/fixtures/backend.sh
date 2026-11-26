@@ -25,6 +25,7 @@ case "$1" in
   partial) echo "{\"published\": [\"${2%%,*}\"]}"; echo "boom" >&2; exit 1 ;;
   fail) echo "boom" >&2; exit 1 ;;
   offline) echo "GitLab unreachable (gitlab.example.com): timed out" >&2; exit 3 ;;
+  notgitlab) echo "github.com is not a GitLab server (HTTP 404 with text/html)" >&2; exit 6 ;;
   nomr) echo "No open MR for branch 'main' in g/p: !7 was merged (use --mr IID)." >&2; exit 5 ;;
   slow) sleep 5 ;;
   *) ;;

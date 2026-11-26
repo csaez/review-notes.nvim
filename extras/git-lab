@@ -63,7 +63,8 @@ group/project!IID or the MR URL. Without REF (and --mr defaults to) the open
 MR of the current branch.
 
 Exit status: 1 an error, 3 GitLab unreachable (offline, timeout), 4 no
-access (401, 403), 5 no such MR (404, or no open MR for the branch).
+access (401, 403, or a project not found), 5 no such MR (404, or no open MR
+for the branch), 6 the remote is not a GitLab server.
 
 To pick an MR interactively, pipe ``mr list`` into a picker, e.g.:
     git-lab mr checkout "$(git-lab mr list --recursive | fzf | cut -f1)"
@@ -93,6 +94,7 @@ EXIT_ERROR = 1
 EXIT_UNREACHABLE = 3
 EXIT_NO_ACCESS = 4
 EXIT_NO_MR = 5
+EXIT_NOT_GITLAB = 6
 
 
 class GitLabError(Exception):
@@ -220,10 +222,7 @@ class Repo:
             with urllib.request.urlopen(req, timeout=timeout()) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:400]
-            raise GitLabError(
-                f"HTTP {exc.code} {method} {path}: {detail}", http_status(exc.code)
-            ) from exc
+            raise self.http_error(exc, method, path) from exc
         except urllib.error.URLError as exc:
             raise GitLabError(
                 f"GitLab unreachable ({self.host}): {exc.reason}", EXIT_UNREACHABLE
@@ -234,7 +233,51 @@ class Repo:
                 f"GitLab unreachable ({self.host}): {exc or type(exc).__name__}",
                 EXIT_UNREACHABLE,
             ) from exc
+        if body and resp.headers.get_content_type() != "application/json":
+            # A sign-in page or captive portal answers 200 with HTML: passing.
+            raise GitLabError(
+                f"{self.host} did not answer as a GitLab API "
+                f"(got {resp.headers.get_content_type()}); signed out of the VPN?",
+                EXIT_UNREACHABLE,
+            )
         return json.loads(body) if body else None
+
+    def http_error(
+        self, exc: urllib.error.HTTPError, method: str, path: str
+    ) -> GitLabError:
+        """A short message and the exit status for an HTTP error."""
+        ctype = exc.headers.get_content_type() if exc.headers else ""
+        if exc.code >= 500:
+            return GitLabError(
+                f"GitLab error on {self.host}: HTTP {exc.code}", EXIT_UNREACHABLE
+            )
+        if ctype != "application/json":
+            # GitLab's API always answers JSON: this is another forge or site.
+            return GitLabError(
+                f"{self.host} is not a GitLab server (HTTP {exc.code} with "
+                f"{ctype or 'no content type'}); set GITLAB_HOST if the project's "
+                "GitLab is elsewhere.",
+                EXIT_NOT_GITLAB,
+            )
+        try:
+            data = json.loads(exc.read().decode(errors="replace"))
+        except ValueError:
+            data = None
+        msg = (
+            data.get("message") or data.get("error") if isinstance(data, dict) else None
+        )
+        if not isinstance(msg, str):
+            msg = json.dumps(msg) if msg else exc.reason
+        if exc.code == 404 and "Project Not Found" in msg:
+            # GitLab hides projects I cannot see behind the same 404.
+            return GitLabError(
+                f"Project {self.project} not found on {self.host}, or no access.",
+                EXIT_NO_ACCESS,
+            )
+        return GitLabError(
+            f"HTTP {exc.code} {method} {path.partition('?')[0]}: {msg}",
+            http_status(exc.code),
+        )
 
     def get_all(self, path: str, params: dict | None = None) -> list[dict]:
         items: list[dict] = []

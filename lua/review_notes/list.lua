@@ -65,6 +65,7 @@ local function sync_line(ctx)
     local why = ({
       offline = "offline since " .. os.date("%H:%M", s.since),
       no_access = "no access to the MR",
+      no_remote = "no remote for this repository",
       no_mr = "no merge request",
     })[s.kind] or "pull failing"
     local paused = s.paused and ", automatic pulls paused" or ""

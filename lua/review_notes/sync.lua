@@ -154,7 +154,7 @@ local function pull(ctx, mode)
     s.error = r.ok and "the backend printed no thread list" or backend.message(r)
     s.since = s.failing and s.since or os.time()
     -- Retrying cannot fix these; a manual pull checks again.
-    s.paused = s.kind == "no_access" or s.kind == "no_mr"
+    s.paused = s.kind == "no_access" or s.kind == "no_mr" or s.kind == "no_remote"
     -- Automatic pulls report a failure once, and again when its kind changes.
     if not (mode == "auto" and s.failing and was == s.kind) then
       local msg = (mode == "auto" and "automatic pull failed: " or "pull failed: ") .. s.error

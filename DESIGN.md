@@ -80,9 +80,9 @@ fine; it reports only new or changed threads, warns once when it starts
 failing, and waits while the notes file has unsaved edits in a buffer.
 
 Failures are told apart by the backend's exit status: unreachable (3, or a
-command stopped after `timeout` seconds), no access (4), no MR (5). Offline
-keeps retrying, quietly; no access and no MR pause automatic pulls until a
-manual one, since retrying cannot fix them. The list and the statusline say
+command stopped after `timeout` seconds), no access (4), no MR (5), not a
+remote of that kind (6). Offline keeps retrying, quietly; the others pause
+automatic pulls until a manual one, since retrying cannot fix them. The list and the statusline say
 which, and when the last pull worked.
 
 A review is tied to its MR: `threads` may report it (`{mr, threads}`), the

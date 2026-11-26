@@ -13,12 +13,13 @@ local M = {}
 ---@alias review_notes.FailKind
 ---| "offline" the remote is unreachable, or the command timed out
 ---| "no_access" no permission
+---| "no_remote" the repository has no remote of this kind (a GitHub repo for git-lab)
 ---| "no_mr" no such merge request
 ---| "error" anything else
 
 --- Exit statuses a backend uses to say why it failed (git-lab's); 124 is a
 --- timeout, as `vim.system` and timeout(1) report it.
-local KINDS = { [3] = "offline", [4] = "no_access", [5] = "no_mr", [124] = "offline" }
+local KINDS = { [3] = "offline", [4] = "no_access", [5] = "no_mr", [6] = "no_remote", [124] = "offline" }
 
 --- Resume *co*, reporting an error instead of losing it: a coroutine that
 --- fails after its first yield has no caller to raise to.

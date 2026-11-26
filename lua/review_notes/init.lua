@@ -249,7 +249,7 @@ function M.status()
   local parts = {}
   local s = ctx.kind == "git" and sync.state(ctx) or {}
   if s.failing then
-    table.insert(parts, ({ offline = "offline", no_access = "no access", no_mr = "no MR" })[s.kind] or "pull failing")
+    table.insert(parts, ({ offline = "offline", no_access = "no access", no_mr = "no MR", no_remote = "no remote" })[s.kind] or "pull failing")
   elseif sync.ended(s.mr) then
     table.insert(parts, s.mr.state)
   end
