@@ -2,7 +2,8 @@
 
 This document describes the design as it is now; it is kept current, not a
 history.
-The README is the user documentation. Backward compatibility of commands,
+The README is the user documentation; WORKFLOWS.md walks through how it is
+used end to end, and the gaps that shows. Backward compatibility of commands,
 keymaps and options is not a goal; the notes file format stays.
 
 ## Principles
