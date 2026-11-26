@@ -6,7 +6,7 @@
 -- or open it directly with `require("review_notes.snacks").open()`.
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
-local panel = require("review_notes.panel")
+local thread = require("review_notes.thread")
 
 local M = {}
 
@@ -51,12 +51,12 @@ M.source = {
   end,
   confirm = function(picker, item)
     picker:close()
-    if item then panel.show(item.ctx, item.key, { reorder = true }) end
+    if item then thread.show(item.ctx, item.key, { reorder = true }) end
   end,
   actions = {
     review_code = function(picker, item)
       picker:close()
-      if item then panel.go_to(item) end
+      if item then thread.go_to(item) end
     end,
     review_reply = function(picker, item)
       picker:close()

@@ -7,7 +7,7 @@ local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local config = require("review_notes.config")
 local backend = require("review_notes.backend")
-local panel = require("review_notes.panel")
+local thread = require("review_notes.thread")
 local sync = require("review_notes.sync")
 
 local M = {}
@@ -296,11 +296,11 @@ local function set_keys(buf)
 
   map("<CR>", function()
     local item = one(buf)
-    if item then panel.show(item.ctx, item.key, { reorder = true }) end
+    if item then thread.show(item.ctx, item.key, { reorder = true }) end
   end, "show in the panel")
   map("o", function()
     local item = one(buf)
-    if item then panel.go_to(item) end
+    if item then thread.go_to(item) end
   end, "go to the code")
   map("r", function()
     local item = one(buf)

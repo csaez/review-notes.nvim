@@ -4,7 +4,8 @@
 --
 --   review   which review a buffer is in, reading and changing it
 --   actions  the verbs on threads, shared by every UI
---   home     the review's buffer (:Review); panel: one thread
+--   home     the review's buffer (:Review)
+--   sidebar  the window on the right; thread: one thread in it
 --   signs    anchors and signs in code buffers
 --   sync     pull and publish
 --   store, merge, backend, compose: the file, the rules, the remote, the editor
@@ -17,7 +18,8 @@ local config = require("review_notes.config")
 local review = require("review_notes.review")
 local actions = require("review_notes.actions")
 local sync = require("review_notes.sync")
-local panel = require("review_notes.panel")
+local thread = require("review_notes.thread")
+local sidebar = require("review_notes.sidebar")
 local home = require("review_notes.home")
 
 local M = {}
@@ -103,7 +105,7 @@ end
 
 -- In code buffers ------------------------------------------------------------
 
---- Show the thread at the cursor in the thread panel (a menu when there are
+--- Show the thread at the cursor in the sidebar (a menu when there are
 --- several).
 function M.thread()
   local buf = vim.api.nvim_get_current_buf()
@@ -111,7 +113,7 @@ function M.thread()
   if not ctx then return notify("no review in this buffer") end
   local here = signs.at(buf, vim.api.nvim_win_get_cursor(0)[1] - 1)
   if #here == 0 then return notify("no thread here") end
-  local function show(a) panel.show(ctx, a.entry.key, { follow = false }) end
+  local function show(a) thread.show(ctx, a.entry.key, { follow = false }) end
   if #here == 1 then return show(here[1]) end
   vim.ui.select(here, {
     prompt = "Show",
@@ -123,7 +125,7 @@ function M.thread()
 end
 
 --- Start a thread on the line, or the selected lines, even where one is
---- already (replies are `r` in the panel). Writes into the notes only;
+--- already (replies are `r` in the sidebar). Writes into the notes only;
 --- `publish` sends it.
 function M.new()
   local buf = vim.api.nvim_get_current_buf()
@@ -164,7 +166,7 @@ local function step(list, dir, cmp)
 end
 
 --- Next or previous thread: the unread ones across the review while there
---- are any, else the threads of this buffer. The panel follows when open.
+--- are any, else the threads of this buffer. The sidebar follows when open.
 ---@param dir integer 1 or -1
 function M.next(dir)
   local buf = vim.api.nvim_get_current_buf()
@@ -181,7 +183,7 @@ function M.next(dir)
       local line = i.kind == "line" and i.line or 0
       return line < row and -1 or line > row and 1 or 0
     end)
-    return panel.show(ctx, target.key, { focus = true })
+    return thread.show(ctx, target.key, { focus = "code" })
   end
   local list = signs.anchored(buf)
   if #list == 0 then return notify("nothing unread, no threads in this buffer") end
@@ -189,7 +191,7 @@ function M.next(dir)
     return a.row + 1 < row and -1 or a.row + 1 > row and 1 or 0
   end)
   vim.api.nvim_win_set_cursor(0, { target.row + 1, 0 })
-  if panel.is_open() then panel.show(ctx, target.entry.key, { follow = false }) end
+  if sidebar.is_open() then thread.show(ctx, target.entry.key, { follow = false }) end
 end
 
 --- The home of the current review: every thread, the review-wide actions.
@@ -213,15 +215,15 @@ function M.items(buf)
   return ctx and review.items(ctx) or {}
 end
 
---- Show *item* in the thread panel, and its code in the current window.
+--- Show *item* in the sidebar, and its code in the code window.
 ---@param item review_notes.Item
 function M.open_item(item)
-  panel.show(item.ctx, item.key)
+  thread.show(item.ctx, item.key)
 end
 
---- Go to the code of *item* in the current window, the thread in the panel;
---- a thread with no code (the change, a directory) only opens the panel.
-M.goto_item = panel.go_to
+--- Go to the code of *item*, the thread in the sidebar; a thread with no
+--- code (the change, a directory) only shows in the sidebar.
+M.goto_item = thread.go_to
 
 ---@param item review_notes.Item
 ---@param action "resolve"|"read"|"approve"|"discard"

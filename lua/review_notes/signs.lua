@@ -1,6 +1,6 @@
 -- Threads in code buffers: an extmark per anchor, so it follows edits, and a
 -- sign on it (a bar down the range, the state icon on its last line). No
--- text: the conversation is in the thread panel. Threads on the whole change
+-- text: the conversation is in the sidebar. Threads on the whole change
 -- or a whole file have no line and nothing here; they are in the home.
 local store = require("review_notes.store")
 local merge = require("review_notes.merge")
