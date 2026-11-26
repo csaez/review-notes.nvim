@@ -107,7 +107,11 @@ window:
 
 - **list**: the whole review (`reviewnotes://review/<notes path>`,
   filetype `reviewlist`).
-- **thread**: one thread (`reviewnotes://thread`, filetype `markdown`).
+- **thread**: one thread (`reviewnotes://thread`, filetype `reviewthread`,
+  highlighted as markdown).
+
+Statusline plugins that draw a winbar in every window (lualine) must
+exclude `reviewlist` and `reviewthread`, or they cover the hint bar.
 
 The window has `winfixbuf` set (the plugin lifts it to switch modes), so
 `:edit` and pickers that honor it never open a file in the sidebar. Window

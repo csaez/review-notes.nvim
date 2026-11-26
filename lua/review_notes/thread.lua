@@ -165,7 +165,10 @@ local function ensure_buf()
   vim.bo[buf].bufhidden = "hide"
   vim.bo[buf].swapfile = false
   vim.api.nvim_buf_set_name(buf, "reviewnotes://thread")
-  vim.bo[buf].filetype = "markdown"
+  -- Its own filetype, so statusline plugins can leave its winbar alone;
+  -- markdown highlighting through treesitter, else the syntax file.
+  vim.bo[buf].filetype = "reviewthread"
+  if not pcall(vim.treesitter.start, buf, "markdown") then vim.bo[buf].syntax = "markdown" end
   vim.bo[buf].modifiable = false
   sidebar.register(buf)
   keys.bind(buf, "Thread", KEYS)

@@ -167,6 +167,13 @@ those that apply to the thread at hand: `a approve` appears on a thread
 with a proposed comment, `R read` on an unread one, and `x` says whether it
 resolves or reopens.
 
+If your statusline plugin draws a winbar in every window, exclude the
+sidebar's filetypes or it covers the bar. For lualine:
+
+```lua
+options = { disabled_filetypes = { winbar = { "reviewlist", "reviewthread" } } }
+```
+
 `?` (or `g?`) opens every key of the mode, grouped. It stays open until
 `q` or `<Esc>`. Press a key there, or `<CR>` on its row, to run it on the
 thread under the cursor; `/` filters the list.
