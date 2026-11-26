@@ -33,6 +33,7 @@ local M = {}
 ---    discard    optional: drops the queued {ids} that submit did not publish
 ---@field mr review_notes.MrConfig? the merge request in the list; nil or false: none
 ---@field files fun(review: review_notes.ListInfo)? `f` in the list: the changed files
+---  against `review.base`
 
 ---@class review_notes.MrConfig
 ---@field info string[]? prints {ref, title, url, target, source, author} as JSON;
@@ -50,6 +51,8 @@ local M = {}
 ---@class review_notes.ListInfo
 ---@field ctx review_notes.Context
 ---@field mr table? what `mr.info` printed
+---@field base string? the diff base picked under `f`: the MR target, or a
+---  review checkpoint (my last publish, the agent's last fixup)
 
 ---@type review_notes.Config
 M.values = {

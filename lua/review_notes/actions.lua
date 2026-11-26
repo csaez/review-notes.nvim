@@ -31,20 +31,32 @@ function M.read(ctx, key)
   review.edit_thread(ctx, key, function(t, _, side) merge.mark_seen(t, side) end)
 end
 
---- Approve what a tool proposed, so `publish` sends it.
+--- Whether the review is private: a document, or a branch with no MR yet.
+--- Then my new threads start as notes, and approving a finding means "agreed".
+---@param ctx review_notes.Context
+---@param side review_notes.Sidecar
+---@return boolean
+function M.private(ctx, side)
+  return ctx.kind ~= "git" or not side.mr
+end
+
+--- Approve what a tool proposed: on a thread that publishes, so `publish`
+--- sends it; on a local-only one (or any finding while the review is
+--- private), as agreed.
 ---@param ctx review_notes.Context
 ---@param key string
 function M.approve(ctx, key)
-  review.edit_thread(ctx, key, function(t) merge.approve(t) end)
+  review.edit_thread(ctx, key, function(t, _, side) merge.approve(t, M.private(ctx, side)) end)
 end
 
 --- Approve every proposed comment of the review.
 ---@param ctx review_notes.Context
 ---@return integer approved
 function M.approve_all(ctx)
-  return review.edit(ctx, function(doc)
+  return review.edit(ctx, function(doc, side)
     local total = 0
-    for _, t in ipairs(doc.threads) do total = total + merge.approve(t) end
+    local private = M.private(ctx, side)
+    for _, t in ipairs(doc.threads) do total = total + merge.approve(t, private) end
     return total
   end) or 0
 end
@@ -170,12 +182,18 @@ end
 ---@field key string? an existing thread
 ---@field anchor review_notes.Anchor? where to start a new one
 
+--- Mine and not published: a local comment or a note.
+local function is_mine(c) return c.source == "local" or c.source == "note" end
+
 --- Save my comment of a thread (the one not published yet); an empty text
---- removes it, and a new thread with nothing left.
+--- removes it, and a new thread with nothing left. *note* writes it as a
+--- note for the agent, never published; a reply on a local-only thread is
+--- always one.
 ---@param ctx review_notes.Context
 ---@param target review_notes.Target
 ---@param text string
-function M.save_comment(ctx, target, text)
+---@param note boolean?
+function M.save_comment(ctx, target, text, note)
   review.edit(ctx, function(doc)
     local thread
     if target.key then
@@ -188,9 +206,10 @@ function M.save_comment(ctx, target, text)
       thread = { anchor = target.anchor, status = "open", comments = {} }
       table.insert(doc.threads, thread)
     end
+    local source = (note or merge.local_only(thread)) and "note" or "local"
     local mine
     for _, c in ipairs(thread.comments) do
-      if c.source == "local" then mine = c end
+      if is_mine(c) then mine = c end
     end
     if text == "" then
       if mine then
@@ -200,24 +219,42 @@ function M.save_comment(ctx, target, text)
         doc.threads = vim.tbl_filter(function(t) return t ~= thread end, doc.threads)
       end
     elseif mine then
-      mine.body = text
+      mine.body, mine.source = text, source
     else
-      table.insert(thread.comments, { source = "local", body = text })
+      table.insert(thread.comments, { source = source, body = text })
     end
     merge.sort(doc.threads)
   end)
 end
 
+--- The composer starts as a note on a local-only thread (and stays one),
+--- on my existing note, and on a thread not published yet while the review
+--- is private; as a comment for the remote otherwise. `<C-t>` switches.
 local function open_composer(ctx, target, title, thread, win)
   local existing
   for _, c in ipairs(thread and thread.comments or {}) do
-    if c.source == "local" then existing = c.body end
+    if is_mine(c) then existing = c end
+  end
+  -- A document's review never publishes: plain comments, nothing to switch.
+  local fixed = ctx.kind ~= "git" or (thread ~= nil and merge.local_only(thread))
+  local note = false
+  if ctx.kind ~= "git" then
+    note = false
+  elseif fixed then
+    note = true
+  elseif existing then
+    note = existing.source == "note"
+  elseif not (thread and thread.id) then
+    local _, side = review.read(ctx)
+    note = M.private(ctx, side)
   end
   compose.open({
     title = title,
-    text = existing,
+    text = existing and existing.body,
     win = win,
-    on_save = function(text) M.save_comment(ctx, target, text) end,
+    note = note,
+    fixed = fixed,
+    on_save = function(text, as_note) M.save_comment(ctx, target, text, as_note) end,
   })
 end
 

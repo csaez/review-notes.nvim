@@ -20,16 +20,20 @@
 --   ### me (proposed)                   written by a tool, waits for approval
 --   Matches the studio default.
 --
+--   ### me (note)                       mine, for the agent: never published
+--   keep the constant, document it
+--
 -- `## <anchor> {attrs}` starts a thread, `### <who> {attrs}` a comment. Attrs
 -- are `key=value` or flags: `id=`, `mine` (remote comment of mine), `orphan`,
 -- `moved`. A thread without `id` is new. A body line that starts with `#` is
 -- written with a leading `\`. A thread with text but no `###` section is read
--- as one local comment, so a hand-written thread works.
+-- as one local comment, so a hand-written thread works. A thread whose first
+-- comment is a note is local only: publish never sends any of it.
 local M = {}
 
 local uv = vim.uv or vim.loop
 
----@alias review_notes.Source "remote"|"local"|"proposed"
+---@alias review_notes.Source "remote"|"local"|"proposed"|"note"
 
 ---@class review_notes.Anchor
 ---@field path string? nil for the whole change
@@ -143,7 +147,7 @@ local function parse_comment(heading, body)
   local who, attrs = split_attrs(heading)
   local c = { source = "remote", body = body_of(body) }
   local mine = who:match("^me%s*%((%a+)%)$")
-  if mine == "local" or mine == "proposed" then
+  if mine == "local" or mine == "proposed" or mine == "note" then
     c.source = mine
   elseif who == "me" then
     c.source = "local"
@@ -336,6 +340,8 @@ end
 ---@field state string? "opened", "merged", "closed"
 ---@field url string?
 ---@field me string? my user name on the remote
+---@field author string? who opened the MR (agents act as the author only when it is me)
+---@field sha string? the MR's head commit, to compare with my checkout
 ---@field reviewers string[]? who is assigned to review it
 ---@field approved boolean? enough approvals to merge
 ---@field approved_by string[]? who approved it

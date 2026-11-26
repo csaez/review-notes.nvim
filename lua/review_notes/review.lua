@@ -12,6 +12,7 @@ local uv = vim.uv or vim.loop
 ---@field kind "git"|"file"
 ---@field root string repo root, or the file's directory
 ---@field path string the notes file
+---@field branch string? the branch of a git review
 
 function M.notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = "review" })
@@ -58,9 +59,22 @@ local function git(args, cwd)
   return vim.trim(out.stdout)
 end
 
+--- Move a review from a worktree's own git dir (where notes lived before)
+--- to the common one, unless the common one has it already.
+local function migrate(old, new)
+  if old == new or vim.fn.filereadable(old) == 0 or vim.fn.filereadable(new) == 1 then return end
+  vim.fn.mkdir(vim.fs.dirname(new), "p")
+  for _, pair in ipairs({ { old, new }, { store.sidecar_path(old), store.sidecar_path(new) } }) do
+    if vim.fn.filereadable(pair[1]) == 1 then uv.fs_rename(pair[1], pair[2]) end
+  end
+end
+
 local function git_context(root)
-  local gitdir = git({ "rev-parse", "--path-format=absolute", "--git-path", "review" }, root)
-  if not gitdir then return nil end
+  -- The common git dir, shared by every worktree: the review belongs to the
+  -- branch, and `git worktree remove` deletes a worktree's own git dir.
+  local common = git({ "rev-parse", "--path-format=absolute", "--git-common-dir" }, root)
+  if not common then return nil end
+  local gitdir = common .. "/review"
   local branch = git({ "branch", "--show-current" }, root)
   -- Mid-rebase HEAD is detached; keep showing the rebased branch's notes.
   for _, dir in ipairs({ "rebase-merge", "rebase-apply" }) do
@@ -70,7 +84,10 @@ local function git_context(root)
     branch = lines[1] and lines[1]:gsub("^refs/heads/", "") or nil
   end
   if not branch or branch == "" then branch = "HEAD" end
-  return { kind = "git", root = root, path = gitdir .. "/" .. branch .. ".md" }
+  local path = gitdir .. "/" .. branch .. ".md"
+  local own = git({ "rev-parse", "--path-format=absolute", "--git-path", "review" }, root)
+  if own then migrate(own .. "/" .. branch .. ".md", path) end
+  return { kind = "git", root = root, path = path, branch = branch }
 end
 
 -- Memoised per root in *memo*: one refresh walks every buffer.
@@ -268,7 +285,7 @@ M.style = {
 ---@field hl string
 ---@field tags string[]
 ---@field summary string first line of the last comment
----@field who string author of the last comment: `@name`, `me`, `me (proposed)`
+---@field who string author of the last comment: `@name`, `me`, `me (proposed)`, `me (note)`
 ---@field thread string[] the conversation as markdown lines, for a preview
 ---@field text string searchable text: the anchor, tags and the whole conversation
 ---@field rank integer
@@ -278,6 +295,7 @@ M.style = {
 ---@param mine string the label of my unpublished comments
 local function who(c, mine)
   if c.source == "remote" then return "@" .. (c.author or "unknown") end
+  if c.source == "note" then return "me (note)" end
   return c.source == "proposed" and "me (proposed)" or mine
 end
 
@@ -328,6 +346,7 @@ function M.items(ctx)
     if f.resolved and state ~= "resolved" then table.insert(tags, "resolved") end
     if f.proposed and state ~= "proposed" then table.insert(tags, "proposed") end
     if f.unsent and state ~= "unsent" then table.insert(tags, "unsent") end
+    if f.local_only then table.insert(tags, "local") end
     local summary = last and vim.split(last.body, "\n", { plain = true })[1] or ""
     local file = kind == "change" and ctx.path or M.full_path(t.anchor.path, ctx.root)
     -- A submodule's pointer change is anchored on a directory: editing it

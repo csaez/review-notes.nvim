@@ -31,7 +31,7 @@ describe("sidebar, list mode", function()
     vim.fn.writefile({ "a", "b", "c", "d" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
     review.setup({ backend = {}, watch = false, mr = false, auto_pull = false })
-    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir" })) .. "/review" .. "/main.md"
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
     vim.fn.writefile({
       "## change {id=g}", "status: open", "", "### @bo {id=1}", "overall", "",
@@ -46,6 +46,7 @@ describe("sidebar, list mode", function()
         t1 = { status = "open", seen = {} },
         t2 = { status = "resolved", seen = { ["3"] = true }, seen_status = true },
       },
+      mr = { iid = 1, ref = "!1", state = "opened" },
     })
     vim.cmd("edit a.c")
     local select = vim.ui.select

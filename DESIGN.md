@@ -44,18 +44,41 @@ Each comment is exactly one of:
 - **local**: written here, not published. Editable and deletable.
 - **proposed**: a local comment written by a tool (pi). It is not published
   until I approve it.
+- **note**: mine, for the agent only. Never published.
 
-A thread has at most one local or proposed comment at the end (my reply).
-A new thread is a thread whose first comment is local. That is the whole
-model of "unsent": a thread with a trailing local comment, or a status change
-not published yet (`resolved` locally differs from the remote status).
+A thread has at most one local, note or proposed comment at the end (my
+reply). A new thread is a thread whose first comment is local. That is the
+whole model of "unsent": a thread with a trailing local comment, or a status
+change not published yet (`resolved` locally differs from the remote status).
+
+### The two loops
+
+The notes carry two conversations: with peers, through the remote, and with
+the agent, never published. A note keeps the second out of the first.
+
+- A thread whose first comment is a note is **local only**: publish sends
+  none of it (replies, resolve), and it never counts as unsent. Replies on
+  it are notes too.
+- **Approve** means "send it" on a thread that publishes, and "agreed" on a
+  local-only one: the proposed text becomes a note. While the review is
+  **private** (a branch with no MR yet), approving an agent's finding (a new
+  thread it started) also makes it a note, and the composer starts new
+  threads as notes. Once there is an MR, approve sends, as before; a note
+  (`<C-t>` in the composer) is how I say "agreed, keep it between us".
+- **Whose turn** (the agent's rule, in the pi extension): a thread is the
+  agent's when it is open and the last comment that is not the agent's is
+  a note, or my unpublished comment before the MR, or a peer's comment on
+  my own MR. My published reply last waits for the peer. Fixup plays the
+  author, so it refuses on a peer's MR (the MR's `author` against `me`).
 
 ### Unread
 
 A thread is unread when it has a remote comment by someone else that I have
 not seen, or someone else resolved it and I have not looked since. "Seen" is
-stored in the sidecar, set when the thread is shown in the sidebar, or
-marked by key in the list. Unread is only a highlight and a counter; it
+stored in the sidecar per comment id as a hash of the text I saw, set when
+the thread is shown in the sidebar, or marked by key in the list. A comment
+edited on the remote after I saw it is unread again (an old `true` counts as
+seen). Unread is only a highlight and a counter; it
 never blocks anything.
 
 ## Safe pull
@@ -81,7 +104,9 @@ failing, and waits while the notes file has unsaved edits in a buffer.
 
 Failures are told apart by the backend's exit status: unreachable (3, or a
 command stopped after `timeout` seconds), no access (4), no MR (5), not a
-remote of that kind (6). Offline keeps retrying, quietly; the others pause
+remote of that kind (6). Offline keeps retrying, quietly. No MR is not a
+failure but a branch before its MR: automatic pulls go on, quietly, and
+bring the threads in once it exists. No access and no remote pause
 automatic pulls until a manual one, since retrying cannot fix them. The list and the statusline say
 which, and when the last pull worked.
 
@@ -103,7 +128,10 @@ Publish is always explicit.
 2. The summary lists: new threads, replies, resolves and reopens, and
    proposed comments that are not approved (skipped). While a thread has a
    proposed comment, its status change is held too, so approving is one
-   step.
+   step. Notes and local-only threads are never in it. It warns when my
+   checkout differs from the MR's head (`sha`): behind (line comments may be
+   refused) or commits not pushed (replies may point at code peers cannot
+   see). The plugin never pushes or updates; it only says so.
 3. After confirm: create everything as remote drafts (when the backend has
    drafts), then submit exactly the ids created, which sends one
    notification. What submit did not publish is discarded, so retrying
@@ -112,6 +140,22 @@ Publish is always explicit.
 4. Resolves and reopens go after the submit (publishing a reply reopens a
    thread on GitLab).
 5. Pull again. Published local comments become remote comments.
+6. HEAD is recorded as the `publish` checkpoint (below).
+
+## Checkpoints
+
+A review event leaves a commit to diff against: my last publish (`publish`),
+the start of the agent's last fixup (`fixup`, written by the pi extension).
+Each is a ref, `refs/review-notes/<branch>/<name>`, local and never pushed,
+so the commit survives gc after a rebase or force-push. `f` in the list
+offers them as diff bases after the MR target, and passes the one picked as
+`review.base` to the `files` hook.
+
+When HEAD no longer contains a checkpoint (the branch was rebased), the
+checkpoint is replayed onto the branch's current merge base with the target
+(`git merge-tree --write-tree`, then `commit-tree`), so the diff shows what
+the author changed and not what came from upstream. If that conflicts, the
+raw checkpoint is offered and labelled as including upstream changes.
 
 ## The sidebar
 
@@ -286,7 +330,7 @@ mr = {
     { key = "o", desc = "browser", fn = function(mr) vim.ui.open(mr.url) end },
   },
 }, -- the default; false for none
-files = function(review) Snacks.picker.git_diff({ base = review.mr.target }) end,
+files = function(review) Snacks.picker.git_diff({ base = review.base }) end, -- target or a checkpoint
 ```
 
 `{input}` asks for a line of text first; empty leaves it out, with the
@@ -354,7 +398,12 @@ the sidebar (`r`).
 
 ## Storage
 
-Two files per review, in `.git/review/` (or beside a file outside git):
+Two files per review, in `review/` under the common git dir (or beside a
+file outside git). The common dir is shared by every worktree: the review
+belongs to the branch, and `git worktree remove` deletes a worktree's own
+git dir. Notes found in a worktree's own dir (where they lived before) are
+moved over the first time the review is opened, unless the common dir has
+that branch's notes already.
 
 - `<branch>.md`: the notes. Humans and agents read and write it.
 - `<branch>.json`: sidecar for the plugin: remote status, last-seen
@@ -404,8 +453,9 @@ Rules:
 - `status: open|resolved` is the first line of the thread; the remote status
   is in the sidecar, so a difference between the two means "resolve or reopen
   is not published yet".
-- `### @author` is a remote comment, `### me (local)` and
-  `### me (proposed)` are mine. Body is everything up to the next heading.
+- `### @author` is a remote comment, `### me (local)`, `### me (note)` and
+  `### me (proposed)` are mine. A thread whose first comment is a note is
+  local only. Body is everything up to the next heading.
   Body lines starting with `#` are escaped on write.
 - Agents add a thread or a reply by appending a section with
   `### me (proposed)`, and need no other knowledge of the format. The
@@ -440,6 +490,7 @@ The git-lab script in `extras/` implements it for GitLab.
 | `review.lua`      | the current review: context, items, sorting, watcher, change listeners |
 | `sync.lua`        | pull and publish                                           |
 | `actions.lua`     | the verbs, on items: resolve, approve, discard, reply, ... |
+| `checkpoint.lua`  | review checkpoints (refs), diff bases, ahead / behind      |
 | `sidebar.lua`     | the sidebar window and the code window                     |
 | `keys.lua`        | key declarations: mappings, hint bar, `?` menu             |
 | `list.lua`        | list mode: drawing, folds, review-wide keys, MR hooks      |
@@ -459,9 +510,12 @@ logic is testable in plain Lua, and a fake backend script covers the rest.
 ## Pi extension
 
 - `/review` writes `### me (proposed)` comments on new threads; it never
-  touches remote comments.
-- `/fixup` reads open threads, makes `fixup!` commits, and adds a proposed
-  reply, resolving the thread when it is done. The resolve is held with the
-  proposed reply until I approve it.
+  touches remote comments. On a peer's MR it first re-checks my open
+  threads the author answered (a proposed resolve, or a reply saying what
+  is missing).
+- `/fixup` takes the threads that are its turn (see "The two loops"), makes
+  `fixup!` commits, and adds a proposed reply, resolving the thread when it
+  is done. The resolve is held with the proposed reply until I approve it.
+  It refuses on a peer's MR, and records the `fixup` checkpoint first.
 - Because proposed comments never publish without approval, running it in
   the middle of a pull from a peer is harmless.

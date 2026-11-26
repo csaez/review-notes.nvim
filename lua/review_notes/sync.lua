@@ -6,6 +6,7 @@ local backend = require("review_notes.backend")
 local config = require("review_notes.config")
 local review = require("review_notes.review")
 local store = require("review_notes.store")
+local checkpoint = require("review_notes.checkpoint")
 
 local M = {}
 
@@ -31,7 +32,9 @@ M.pulled_at = {}
 ---@field kind review_notes.FailKind? what kind of failure
 ---@field running boolean? a pull is under way
 ---@field paused boolean? automatic pulls wait for a manual one: retrying
----  cannot help (no access, no MR, the MR merged or closed)
+---  cannot help (no access, no remote, the MR merged or closed). No MR is not
+---  a pause: the branch is before its MR, and automatic pulls find it once
+---  it is created
 ---@field mr review_notes.MrRecord|false|nil the MR the review is on, from
 ---  the sidecar (false: none recorded)
 ---@field declined string? the successor MR I chose not to move to, this session
@@ -154,9 +157,12 @@ local function pull(ctx, mode)
     s.error = r.ok and "the backend printed no thread list" or backend.message(r)
     s.since = s.failing and s.since or os.time()
     -- Retrying cannot fix these; a manual pull checks again.
-    s.paused = s.kind == "no_access" or s.kind == "no_mr" or s.kind == "no_remote"
+    s.paused = s.kind == "no_access" or s.kind == "no_remote"
+    if s.kind == "no_mr" then
+      -- Not a failure: the branch has no MR yet. Only a manual pull says so.
+      if mode == nil then notify("no merge request for this branch yet: nothing to pull") end
     -- Automatic pulls report a failure once, and again when its kind changes.
-    if not (mode == "auto" and s.failing and was == s.kind) then
+    elseif not (mode == "auto" and s.failing and was == s.kind) then
       local msg = (mode == "auto" and "automatic pull failed: " or "pull failed: ") .. s.error
       if mode == "auto" and s.paused then msg = msg .. "\nautomatic pulls paused: pull to check again" end
       notify(msg, mode == "auto" and vim.log.levels.WARN or vim.log.levels.ERROR)
@@ -217,8 +223,8 @@ end
 --- `auto_pull` seconds (failed ones count, so an offline remote is not hit
 --- on every focus). Quiet unless threads came in or it starts failing.
 --- Skipped while the notes file has unsaved edits in a buffer: the write
---- would conflict with them; and while paused: no access, no MR, or the MR
---- merged or closed (a manual pull checks again).
+--- would conflict with them; and while paused: no access, no remote, or the
+--- MR merged or closed (a manual pull checks again).
 ---@param ctx review_notes.Context?
 function M.auto_pull(ctx)
   local every = config.values.auto_pull
@@ -285,6 +291,30 @@ local function describe_plan(items, held)
   return table.concat(lines, "\n")
 end
 
+--- What peers will not see of my checkout: HEAD is not the MR's head (line
+--- comments are refused, or anchored to code they cannot see), and commits
+--- not pushed (replies would point at them). Lines for publish's confirm.
+---@return string[]
+local function checkout_warnings(ctx, mr, items)
+  local out = {}
+  local on_code = false
+  for _, item in ipairs(items) do
+    if item.kind == "thread" and item.thread.anchor.path then on_code = true end
+  end
+  local ahead, behind
+  if mr and mr.sha then ahead, behind = checkpoint.ahead_behind(ctx.root, mr.sha) end
+  if behind and behind > 0 then
+    table.insert(out, ("  your checkout is %d commit(s) behind the MR: update it first"):format(behind)
+      .. (on_code and ", line comments may be refused" or ""))
+  end
+  local unpushed = checkpoint.unpushed(ctx.root)
+  if (unpushed or ahead or 0) > 0 then
+    table.insert(out, ("  %d commit(s) not pushed: peers cannot see them yet"):format(unpushed or ahead)
+      .. (on_code and ", line comments may be refused" or ""))
+  end
+  return out
+end
+
 local function submit(ctx, ids)
   local cmds = config.values.backend
   local r = backend.run(cmds, "submit", { root = ctx.root, vars = M.vars(ctx, { ids = table.concat(ids, ",") }) })
@@ -329,6 +359,8 @@ function M.publish(ctx)
       header = ("MR %s is already approved by %s. Publish?\n"):format(mr.ref or "",
         table.concat(vim.tbl_map(function(u) return "@" .. u end, peers), ", "))
     end
+    local warnings = checkout_warnings(ctx, mr, plan.items)
+    if #warnings > 0 then header = header .. table.concat(warnings, "\n") .. "\n" end
     local choice = choose(header .. describe_plan(plan.items, plan.held), choices)
     if not choice or choice == "Cancel" then return end
     local items = plan.items
@@ -404,6 +436,8 @@ function M.publish(ctx)
         if found then merge.published(d, s, found) end
       end
     end)
+    -- The next round reads what changed since this one (`f`).
+    if next(done) then checkpoint.record(ctx, "publish") end
     -- What was sent comes back as remote comments, mine, so not unread.
     pull(ctx, "quiet")
     if #failures > 0 then

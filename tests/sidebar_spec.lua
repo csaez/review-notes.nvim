@@ -34,7 +34,7 @@ describe("sidebar, thread mode", function()
     vim.fn.writefile({ "a", "b", "c", "d" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
     review.setup({ backend = {}, watch = false, auto_pull = false })
-    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir" })) .. "/review" .. "/main.md"
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
     vim.fn.writefile({
       "## change {id=g}", "status: open", "", "### @bo {id=1}", "overall", "",
@@ -43,6 +43,7 @@ describe("sidebar, thread mode", function()
     }, notes_path)
     store.write_sidecar(store.sidecar_path(notes_path), {
       threads = { g = { status = "open", seen = { ["1"] = true } }, t1 = { status = "open", seen = {} } },
+      mr = { iid = 1, ref = "!1", state = "opened" },
     })
     vim.cmd("edit a.c")
     ctx = require("review_notes.review").context()

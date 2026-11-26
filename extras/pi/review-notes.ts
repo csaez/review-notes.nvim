@@ -15,8 +15,8 @@
  *
  * Review notes, shared with the nvim plugin (review-notes.nvim, format in
  * lua/review_notes/store.lua): code in a git worktree is reviewed in
- * $(git rev-parse --git-path review)/<branch>.md, which the plugin syncs with
- * the remote; any file outside git (e.g. a markdown draft) in a sibling
+ * $(git rev-parse --git-common-dir)/review/<branch>.md, which the plugin syncs
+ * with the remote; any file outside git (e.g. a markdown draft) in a sibling
  * <file>.review.md, local only. For a file outside git /review and /fixup
  * take the document (its path, its .review.md file, or outside a repo a
  * description of it), and fixups are edits in place: there is no version
@@ -24,7 +24,9 @@
  *
  * Everything pi writes is a `### me (proposed)` comment: the plugin never
  * publishes it until the human approves it, so a round of pi can run at any
- * time, even while peers comment. Resolving a thread is `status: resolved` on
+ * time, even while peers comment. `### me (note)` is the human writing to pi
+ * only; the plugin never publishes it. /fixup is for the human's own branch:
+ * on a peer's MR (the sidecar's mr.author is not mr.me) it refuses. Resolving a thread is `status: resolved` on
  * it, held back by the plugin until the proposed reply is approved.
  *
  * Handover rule: the human and the agent take turns on the same branch, and
@@ -39,10 +41,20 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
 interface Comment {
-  who: string; // "@alice", "me (local)", "me (proposed)"
+  who: string; // "@alice", "me (local)", "me (proposed)", "me (note)"
   proposed: boolean; // written by a tool, waits for approval
-  mine: boolean; // mine, not published yet
+  mine: boolean; // mine, not published yet (local or note)
+  note: boolean; // mine, for the agent only: never published
+  published: boolean; // a remote comment of mine ({mine}, or @<me>)
   body: string;
+}
+
+// What the plugin's sidecar (<branch>.json) knows of the MR: who wrote it,
+// and my user name. No mr: the branch has no MR yet.
+interface MrRecord {
+  author?: string;
+  me?: string;
+  ref?: string;
 }
 
 interface Thread {
@@ -117,9 +129,12 @@ export default function reviewNotes(pi: ExtensionAPI) {
     return false;
   };
 
+  // Under the common git dir, shared by every worktree: the review belongs to
+  // the branch, and `git worktree remove` deletes a worktree's own git dir.
+  // Same path as the plugin, which also moves notes from the old place.
   const getNotesPath = (cwd: string): string | undefined => {
-    const dir = git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "review");
-    return dir ? join(dir, `${getBranch(cwd) ?? "HEAD"}.md`) : undefined;
+    const dir = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir");
+    return dir ? join(dir, "review", `${getBranch(cwd) ?? "HEAD"}.md`) : undefined;
   };
 
   // ---------------------------------------------------------------------------
@@ -155,7 +170,15 @@ export default function reviewNotes(pi: ExtensionAPI) {
         sawStatus = false;
       } else if (h && h[1] === "###" && thread) {
         const who = h[2]!;
-        comment = { who, proposed: who === "me (proposed)", mine: who === "me" || who === "me (local)", body: "" };
+        const note = who === "me (note)";
+        comment = {
+          who,
+          proposed: who === "me (proposed)",
+          mine: note || who === "me" || who === "me (local)",
+          note,
+          published: /(?:^|\s)mine(?:\s|$)/.test(h[3] ?? ""),
+          body: "",
+        };
         thread.comments.push(comment);
       } else if (thread) {
         const status = !comment && !sawStatus ? /^status:\s*(\w+)\s*$/.exec(line) : null;
@@ -166,7 +189,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
           comment.body += (comment.body ? "\n" : "") + line.replace(/^\\(\\*#)/, "$1");
         } else if (line.trim()) {
           // Bare text under a thread is one local comment, as in the plugin.
-          comment = { who: "me (local)", proposed: false, mine: true, body: line };
+          comment = { who: "me (local)", proposed: false, mine: true, note: false, published: false, body: line };
           thread.comments.push(comment);
         }
       }
@@ -175,18 +198,46 @@ export default function reviewNotes(pi: ExtensionAPI) {
     return out;
   };
 
-  const readThreads = (notesFile: string): Thread[] => parseThreads(readText(notesFile));
+  const readThreads = (notesFile: string): Thread[] => {
+    const threads = parseThreads(readText(notesFile));
+    const mr = readMr(notesFile);
+    if (mr?.me) {
+      for (const t of threads) for (const c of t.comments) if (c.who === `@${mr.me}`) c.published = true;
+    }
+    return threads;
+  };
 
-  // Whose turn it is, from the thread alone: pi's when it is open and pi did
-  // not speak last. A fresh finding (a single proposed comment, from /review)
-  // is pi's too: it acts on its own findings by severity, with no approval
-  // step. After pi answers (a proposed reply last, or a resolve), the thread
-  // waits for me until I or the remote add something.
-  const needsPi = (t: Thread): boolean => {
+  const readMr = (notesFile: string): MrRecord | undefined => {
+    try {
+      const side = JSON.parse(readFileSync(notesFile.replace(/\.md$/, ".json"), "utf8"));
+      return side && typeof side.mr === "object" && side.mr ? side.mr : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Whose turn it is, from the thread and the MR. Pi's when the thread is open
+  // and the last word that is not pi's asks it to act:
+  // - a note (`me (note)`): written for pi, always;
+  // - my unpublished comment: only before the MR (then it can only be for pi);
+  //   after, it is going to a peer;
+  // - a peer's comment: only on my own MR (*mine*), where pi plays the author.
+  // My published comment last means the thread waits for the peer. A fresh
+  // finding (a single proposed comment, from /review) is pi's too: it acts on
+  // its own findings by severity, with no approval step. After pi answers (a
+  // proposed reply last, or a resolve), the thread waits for me.
+  const needsPi = (t: Thread, mr: MrRecord | undefined): boolean => {
     if (t.resolved || t.comments.length === 0) return false;
     const last = t.comments[t.comments.length - 1]!;
-    return !last.proposed || t.comments.length === 1;
+    if (last.proposed) return t.comments.length === 1;
+    if (last.note) return true;
+    if (last.mine) return !mr;
+    if (last.published) return false;
+    return !mr || isMyMr(mr);
   };
+
+  // No author or user name known (an older sidecar): assume mine, as before.
+  const isMyMr = (mr: MrRecord): boolean => !mr.author || !mr.me || mr.author === mr.me;
 
   const SEVERITY_RE = /^\s*(FIX|CHECK|CONSIDER|QUESTION|NIT)\b/;
 
@@ -210,9 +261,29 @@ export default function reviewNotes(pi: ExtensionAPI) {
     });
   };
 
-  const reportNothingForPi = (all: Thread[], where: string, ctx: ExtensionCommandContext): void => {
-    const waiting = all.filter((t) => !t.resolved && !needsPi(t)).length;
-    const pending = waiting ? `: ${waiting} open thread${waiting === 1 ? "" : "s"} waiting for you.` : ".";
+  // On a peer's MR, my open threads that the author answered since my last
+  // word: /review checks each against the code before looking for new
+  // findings. Mine: I started it (published, local or a note).
+  const threadsToRecheck = (notesFile: string): Thread[] => {
+    const mr = readMr(notesFile);
+    if (!mr || isMyMr(mr)) return [];
+    return readThreads(notesFile).filter((t) => {
+      if (t.resolved || !t.id || t.comments.length === 0) return false;
+      const first = t.comments[0]!;
+      if (!(first.published || first.mine)) return false;
+      const last = t.comments[t.comments.length - 1]!;
+      return !last.proposed && !last.published && !last.mine;
+    });
+  };
+
+  const reportNothingForPi = (
+    all: Thread[],
+    mr: MrRecord | undefined,
+    where: string,
+    ctx: ExtensionCommandContext,
+  ): void => {
+    const waiting = all.filter((t) => !t.resolved && !needsPi(t, mr)).length;
+    const pending = waiting ? `: ${waiting} open thread${waiting === 1 ? "" : "s"} waiting for you or a peer.` : ".";
     ctx.ui.notify(`Nothing for pi ${where}${pending}`, "info");
   };
 
@@ -226,9 +297,9 @@ export default function reviewNotes(pi: ExtensionAPI) {
     "`path` a whole file, `path:N` or `path:N-M` code; a `{id=X}` after the anchor is a remote " +
     "thread. The line after it is `status: open` or `status: resolved`. `### <who>` starts a " +
     "comment: `### @alice` is a remote comment, `### me (local)` is mine (the human's) and not " +
-    "published yet, `### me (proposed)` is yours. Never edit `@author` comments, `me (local)` " +
-    "comments or `{id=...}` attributes. A body line that starts with `#` is written with a " +
-    "leading `\\`.";
+    "published yet, `### me (note)` is mine and only for you (never published), `### me (proposed)` " +
+    "is yours. Never edit `@author`, `me (local)` or `me (note)` comments, or `{id=...}` " +
+    "attributes. A body line that starts with `#` is written with a leading `\\`.";
 
   const label = (t: Thread): string => {
     const first = t.comments[t.comments.length - 1]?.body.split("\n")[0] ?? "";
@@ -250,7 +321,7 @@ export default function reviewNotes(pi: ExtensionAPI) {
   // approve them, so acting on them needs no approval.
   const RESOLVE_RULES = [
     "Read every listed thread and the `change` threads before changing anything.",
-    "A thread's severity is the tag that starts its first comment; a later `me (local)` comment or an `@author` reply can change what is asked, and wins. No tag (a peer's or my own comment): treat it as a request, do it unless it is unclear.",
+    "A thread's severity is the tag that starts its first comment; a later `me (local)` or `me (note)` comment or an `@author` reply can change what is asked, and wins. No tag (a peer's or my own comment): treat it as a request, do it unless it is unclear.",
     "FIX: mandatory. Make the change. If it is wrong or impossible, say why in the reply and leave the thread open.",
     "CHECK: verify first (read the code, run the relevant tests). A real problem: fix it as for FIX. Not a problem: no change, reply with the evidence.",
     "CONSIDER and NIT: optional, judge them. Do the change when it is clearly better and cheap; otherwise decline in the reply with a short reason. Never a reason to touch unrelated code.",
@@ -447,9 +518,9 @@ export default function reviewNotes(pi: ExtensionAPI) {
     const notesFile = siblingNotes(doc);
     const name = basename(doc);
     const all = readThreads(notesFile);
-    const selected = all.filter(needsPi);
+    const selected = all.filter((t) => needsPi(t, undefined));
     if (selected.length === 0) {
-      reportNothingForPi(all, `in ${basename(notesFile)}`, ctx);
+      reportNothingForPi(all, undefined, `in ${basename(notesFile)}`, ctx);
       return;
     }
     pi.sendUserMessage(`Address my review notes on \`${doc}\`. Notes: \`${notesFile}\` (paths are \`${name}\`).
@@ -507,12 +578,18 @@ ${bullets([
 
   
       const request = arg ? `Request (scope, ticket, focus, depth):\n${arg}` : "Request: none.";
+      const recheck = threadsToRecheck(notesFile);
+      const recheckStep = recheck.length
+        ? `0. Re-check first. These open threads are mine and got answers or new code since I wrote them:\n${recheck
+            .map((t) => `- ${label(t)}`)
+            .join("\n")}\nFor each: read the replies and the current code. Addressed: append a \`### me (proposed)\` reply saying how (one line) and set \`status: resolved\`. Not addressed: append a \`### me (proposed)\` reply saying what is still missing, leave it open. Never edit existing comments. Then review the change as below; a finding already covered by one of these threads is not a new finding.\n\n`
+        : "";
 
       pi.sendUserMessage(`Review code on branch \`${branch}\` as a strict senior engineer. Much of it is AI-generated: expect reinvented wheels, needless code, tests that check the wrong thing. Change no code; findings go to the notes file.
 
 ${request}
 
-Scope: what the request names (git range, commits, paths); else uncommitted changes including untracked files; else the branch against \`git-lab mr target\`. Ask if unclear.
+${recheckStep}Scope: what the request names (git range, commits, paths); else uncommitted changes including untracked files; else the branch against \`git-lab mr target\`. Ask if unclear.
 
 1. Intent. Read the change and enough context. Print one line per changed file, then its purpose in 1-2 sentences. Sources: a ticket in the request (read via Jira, read-only; say if it fails), the request, the code. Still unclear: stop and ask. Never infer it from branch names or commit subjects.
 2. Depth. Depth stated in the request is a given: use it, do not re-check. Elsewhere, per changed area: dependents (LSP references, grep), public API, shared or core modules, persisted formats, config, build. Reach, not diff size. Always risky: security, concurrency, migrations and stored data, error and cleanup paths. Mark each area light or deep.
@@ -588,15 +665,28 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
         return;
       }
 
+      // Fixup plays the author: on a peer's MR it would commit to their branch.
+      const mr = readMr(notesFile);
+      if (mr && !isMyMr(mr)) {
+        ctx.ui.notify(
+          `/fixup is for your own MR: ${mr.ref ?? "this MR"} is @${mr.author}'s. ` +
+            "Use /review to check their fixes against your threads.",
+          "warning",
+        );
+        return;
+      }
       const scope = args.trim();
       const all = readThreads(notesFile).filter((n) => inScope(n, scope, root, ctx.cwd));
-      const selected = all.filter(needsPi);
+      const selected = all.filter((t) => needsPi(t, mr));
       if (selected.length === 0) {
         const where = `in the review notes${scope ? ` (scope "${scope}")` : ""}`;
-        reportNothingForPi(all, where, ctx);
+        reportNothingForPi(all, mr, where, ctx);
         return;
       }
       if (!requireCleanTree(ctx.cwd, "fixup", ctx)) return;
+      // A diff base for the plugin's `f`: what this round changes. Same ref
+      // as the plugin's checkpoints; a ref keeps the commit after a rebase.
+      git(ctx.cwd, "update-ref", `refs/review-notes/${branch}/fixup`, "HEAD");
   
       pi.sendUserMessage(`Address my review notes on branch \`${branch}\`. Notes: \`${notesFile}\` (inside .git, never commit it; paths repo-relative).
 

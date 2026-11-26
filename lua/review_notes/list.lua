@@ -11,6 +11,7 @@ local thread = require("review_notes.thread")
 local sidebar = require("review_notes.sidebar")
 local sync = require("review_notes.sync")
 local keys = require("review_notes.keys")
+local checkpoint = require("review_notes.checkpoint")
 
 local M = {}
 
@@ -43,8 +44,7 @@ local lists = {}
 local function notify(msg, level) review.notify(msg, level) end
 
 local function branch_of(ctx)
-  -- The notes are <gitdir>/review/<branch>.md, and a branch may hold slashes.
-  return ctx.kind == "git" and ctx.path:match("/review/(.+)%.md$") or vim.fs.basename(ctx.path)
+  return ctx.kind == "git" and ctx.branch or vim.fs.basename(ctx.path)
 end
 
 local function ago(t)
@@ -66,10 +66,10 @@ local function sync_line(ctx)
       offline = "offline since " .. os.date("%H:%M", s.since),
       no_access = "no access to the MR",
       no_remote = "no remote for this repository",
-      no_mr = "no merge request",
+      no_mr = "no merge request yet",
     })[s.kind] or "pull failing"
     local paused = s.paused and ", automatic pulls paused" or ""
-    return ("%s%s  (%s)"):format(why, paused, last), "DiagnosticWarn"
+    return ("%s%s  (%s)"):format(why, paused, last), s.kind == "no_mr" and "Comment" or "DiagnosticWarn"
   end
   if sync.ended(s.mr) then return last .. ", automatic pulls stopped", "Comment" end
   return last, "Comment"
@@ -107,6 +107,22 @@ local function review_line(h)
     table.insert(parts, "reviewer" .. (#reviewers == 1 and "" or "s") .. ": " .. list)
   end
   return table.concat(parts, "  "), hl
+end
+
+--- How my checkout compares with the MR's head: what peers see is not what
+--- I read. nil when they are the same, or the MR's head is unknown.
+---@return string?
+local function checkout_line(h)
+  local mr = sync.state(h.ctx).mr
+  local sha = mr and mr.sha or (h.mr and h.mr.sha)
+  if not sha or h.ctx.kind ~= "git" then return nil end
+  local ahead, behind = checkpoint.ahead_behind(h.ctx.root, sha)
+  if not ahead then return "the MR's head is not in this checkout: fetch" end
+  if ahead == 0 and behind == 0 then return nil end
+  local parts = {}
+  if ahead > 0 then table.insert(parts, ("%d ahead (not pushed)"):format(ahead)) end
+  if behind > 0 then table.insert(parts, ("%d behind (update)"):format(behind)) end
+  return "checkout vs MR: " .. table.concat(parts, ", ")
 end
 
 -- Drawing ---------------------------------------------------------------------
@@ -149,6 +165,8 @@ local function draw(buf)
   end
   local review_text, review_hl = review_line(h)
   if review_text then add(review_text, { { 0, -1, review_hl } }) end
+  local checkout_text = checkout_line(h)
+  if checkout_text then add(checkout_text, { { 0, -1, "DiagnosticWarn" } }) end
   if h.mr_error then add("MR: " .. h.mr_error, { { 0, -1, "DiagnosticWarn" } }) end
   local parts = {}
   for _, s in ipairs(SECTIONS) do
@@ -296,9 +314,22 @@ local function load_mr(buf)
   end)
 end
 
-local function info(buf)
+local function info(buf, base)
   local h = lists[buf]
-  return { ctx = h.ctx, mr = h.mr }
+  return { ctx = h.ctx, mr = h.mr, base = base or (h.mr and h.mr.target) }
+end
+
+--- `f`: the changed files against a base. With checkpoints (my last
+--- publish, the agent's last fixup) a menu picks the base first.
+local function files(buf)
+  local h = lists[buf]
+  if not config.values.files then return notify("no `files` function configured") end
+  local bases = checkpoint.bases(h.ctx, h.mr and h.mr.target)
+  if #bases <= 1 then return config.values.files(info(buf, bases[1] and bases[1].rev)) end
+  vim.ui.select(bases, {
+    prompt = "Changed files",
+    format_item = function(b) return b.label end,
+  }, function(b) if b then config.values.files(info(buf, b.rev)) end end)
 end
 
 local function run_mr_action(buf, a)
@@ -389,10 +420,8 @@ local function keys_of(buf)
     end },
     { lhs = "D", group = "Review", desc = "discard every proposed comment", fn = function() actions.discard_proposed(h.ctx) end },
     { lhs = "m", group = "Review", desc = "merge request actions", hint = "MR", fn = function() mr_menu(buf) end },
-    { lhs = "f", group = "Review", desc = "changed files", fn = function()
-      if config.values.files then return config.values.files(info(buf)) end
-      notify("no `files` function configured")
-    end },
+    { lhs = "f", group = "Review", desc = "changed files: the whole change, since my publish, since the fixup",
+      fn = function() files(buf) end },
     { lhs = "e", group = "Review", desc = "edit the notes file (in the code window)", fn = function() sidebar.edit(h.ctx.path) end },
 
     { lhs = "<Tab>", group = "Move", desc = "fold or unfold a section", fn = function()

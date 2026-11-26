@@ -31,7 +31,7 @@ describe("pull and publish", function()
     vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
     vim.fn.writefile({ "x" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
-    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" }))
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir" })) .. "/review"
       .. "/main.md"
     log, threads_file = repo .. "/calls.log", repo .. "/threads.json"
     vim.fn.writefile({ "[]" }, threads_file)
@@ -168,7 +168,7 @@ describe("pull and publish", function()
     assert.truthy(table.concat(msgs, "\n"):find("timed out"))
   end)
 
-  it("no MR pauses automatic pulls until a manual pull", function()
+  it("no MR is not a failure: automatic pulls go on quietly, and find the MR once it exists", function()
     local sync = require("review_notes.sync")
     local ctx = require("review_notes.review").context()
     review.config.backend.threads = cmd("nomr")
@@ -176,14 +176,15 @@ describe("pull and publish", function()
     local notify, msgs = vim.notify, {}
     vim.notify = function(m) table.insert(msgs, m) end
     sync.auto_pull(ctx)
-    wait_for(function() return sync.state(ctx).failing end, "first attempt")
-    assert.is_true(sync.state(ctx).paused)
-    assert.truthy(table.concat(msgs, "\n"):find("!7 was merged"))
+    wait_for(function() return #calls() == 1 and not sync.state(ctx).running end, "first attempt")
+    assert.are.equal("no_mr", sync.state(ctx).kind)
+    assert.is_falsy(sync.state(ctx).paused)
+    assert.are.same({}, msgs)
+    -- The MR is created: the next automatic pull brings its threads in.
+    review.config.backend.threads = cmd("threads")
+    write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
     sync.auto_pull(ctx)
-    vim.wait(300)
-    assert.are.equal(1, #calls())
-    review.pull()
-    wait_for(function() return #calls() == 2 end, "manual pull")
+    wait_for(function() return #doc().threads == 1 end, "automatic pull")
     vim.notify = notify
   end)
 
@@ -347,6 +348,32 @@ describe("pull and publish", function()
     end)
   end)
 
+  it("publish records a checkpoint and warns about commits peers cannot see", function()
+    local git = function(...) return vim.trim(vim.fn.system(vim.list_extend({ "git", "-C", repo }, { ... }))) end
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base")
+    local head = git("rev-parse", "HEAD")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "local only")
+    local mr_file = repo .. "/mr.json"
+    vim.env.FAKE_MR = mr_file
+    vim.fn.writefile({ vim.json.encode({ iid = 12, ref = "!12", state = "opened", sha = head }) }, mr_file)
+    review.config.backend.threads = cmd("threads-mr", "--mr={mr}")
+    store.update(notes_path, function(d)
+      table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "local", body = "x" } } })
+      table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "note", body = "for pi" } } })
+    end)
+    local prompt
+    vim.ui.select = function(items, o, cb) prompt = o.prompt cb(items[1]) end
+    review.publish()
+    wait_for(function() return git("rev-parse", "--verify", "--quiet", "refs/review-notes/main/publish") ~= "" end, "checkpoint")
+    assert.truthy(prompt:find("1 commit(s) not pushed", 1, true))
+    assert.are.equal(git("rev-parse", "HEAD"), git("rev-parse", "refs/review-notes/main/publish"))
+    local sent = table.concat(calls(), "\n")
+    assert.truthy(sent:find("stdin: x", 1, true))
+    assert.is_nil(sent:find("for pi", 1, true))
+    local bases = require("review_notes.checkpoint").bases(require("review_notes.review").context(), "HEAD~1")
+    assert.are.same({ "target", "publish" }, vim.tbl_map(function(b) return b.name end, bases))
+  end)
+
   it("publish sends new threads, replies and resolves, once, then pulls", function()
     write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
     review.pull()
@@ -413,6 +440,32 @@ describe("pull and publish", function()
   end)
 end)
 
+describe("worktrees", function()
+  it("keep the notes in the common git dir, and move them there from the worktree's own", function()
+    local main = vim.fn.tempname()
+    local git = function(...) return vim.trim(vim.fn.system(vim.list_extend({ "git" }, { ... }))) end
+    git("init", "-q", "-b", "main", main)
+    git("-C", main, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
+    local wt = main .. "-wt"
+    git("-C", main, "worktree", "add", "-q", "-b", "feat", wt)
+    local own = git("-C", wt, "rev-parse", "--path-format=absolute", "--git-path", "review") .. "/feat.md"
+    vim.fn.mkdir(vim.fs.dirname(own), "p")
+    vim.fn.writefile({ "## change", "status: open", "", "### me (local)", "keep me" }, own)
+    vim.fn.writefile({ "{}" }, store.sidecar_path(own))
+    vim.cmd("cd " .. wt)
+    local ctx = require("review_notes.review").context(vim.api.nvim_create_buf(false, true))
+    assert.are.equal(git("-C", main, "rev-parse", "--path-format=absolute", "--git-common-dir") .. "/review/feat.md", ctx.path)
+    assert.are.equal("feat", ctx.branch)
+    assert.are.equal(0, vim.fn.filereadable(own))
+    assert.are.equal("keep me", store.parse(store.read_lines(ctx.path)).threads[1].comments[1].body)
+    assert.are.equal(1, vim.fn.filereadable(store.sidecar_path(ctx.path)))
+    git("-C", main, "worktree", "remove", "--force", wt)
+    assert.are.equal(1, vim.fn.filereadable(ctx.path))
+    vim.cmd("cd " .. vim.fn.tempname():match("^(.*)/"))
+    vim.fn.delete(main, "rf")
+  end)
+end)
+
 describe("discard", function()
   local repo, notes_path
   before_each(function()
@@ -422,7 +475,7 @@ describe("discard", function()
     vim.fn.writefile({ "a", "b" }, repo .. "/a.c")
     vim.cmd("cd " .. repo)
     review.setup({ backend = {}, auto_pull = false })
-    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-path", "review" })) .. "/main.md"
+    notes_path = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir" })) .. "/review" .. "/main.md"
     vim.fn.mkdir(vim.fs.dirname(notes_path), "p")
     vim.fn.writefile({
       "## a.c:1", "status: open", "", "### me (proposed)", "NIT: pi finding", "",

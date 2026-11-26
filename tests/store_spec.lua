@@ -28,6 +28,9 @@ local SAMPLE = {
   "first",
   "",
   "second",
+  "",
+  "### me (note)",
+  "for the agent",
 }
 
 describe("anchors", function()
@@ -47,6 +50,12 @@ describe("parse", function()
   it("reads the title and threads", function()
     assert.are.equal("Review of x", doc.title)
     assert.are.equal(3, #doc.threads)
+  end)
+
+  it("reads notes for the agent", function()
+    local c = doc.threads[3].comments
+    assert.are.same({ "local", "note" }, { c[1].source, c[2].source })
+    assert.are.equal("for the agent", c[2].body)
   end)
 
   it("treats the change like any other thread", function()

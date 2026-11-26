@@ -1,6 +1,6 @@
 -- Code review notes kept outside the code, synced on demand. See DESIGN.md.
--- The notes of a branch live in `.git/review/<branch>.md` (a file outside
--- git gets a sibling `<file>.review.md`).
+-- The notes of a branch live in `<git common dir>/review/<branch>.md`, shared
+-- by every worktree (a file outside git gets a sibling `<file>.review.md`).
 --
 --   review   which review a buffer is in, reading and changing it
 --   actions  the verbs on threads, shared by every UI

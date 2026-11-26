@@ -39,7 +39,30 @@ end
 ---@param thread review_notes.Thread
 ---@return boolean
 function M.has_unpublished(thread)
-  return has_source(thread, "local") or has_source(thread, "proposed")
+  return has_source(thread, "local") or has_source(thread, "proposed") or has_source(thread, "note")
+end
+
+--- A thread that never leaves the notes: it was started with a note (for the
+--- agent), so publish sends none of it.
+---@param thread review_notes.Thread
+---@return boolean
+function M.local_only(thread)
+  local first = thread.comments[1]
+  return thread.id == nil and first ~= nil and first.source == "note"
+end
+
+--- A fingerprint of a comment's text, to notice it was edited after I saw it.
+---@param body string
+---@return string
+function M.text_hash(body)
+  return vim.fn.sha256(body):sub(1, 16)
+end
+
+--- Whether I saw remote comment *c* as it reads now. `true` is the form
+--- before text hashes, kept as seen.
+local function seen_now(seen, c)
+  local s = c.id and seen[c.id]
+  return s == true or s == M.text_hash(c.body)
 end
 
 ---@param remote review_notes.RemoteThread
@@ -64,7 +87,8 @@ end
 
 -- Unread ----------------------------------------------------------------
 
---- Remote comments of someone else that I have not seen yet.
+--- Remote comments of someone else that I have not seen yet, or that were
+--- edited since I saw them.
 ---@param thread review_notes.Thread
 ---@param state review_notes.ThreadState?
 ---@return integer
@@ -72,7 +96,7 @@ function M.unread_count(thread, state)
   local seen = state and state.seen or {}
   local n = 0
   for _, c in ipairs(thread.comments) do
-    if c.source == "remote" and not c.mine and not (c.id and seen[c.id]) then n = n + 1 end
+    if c.source == "remote" and not c.mine and not seen_now(seen, c) then n = n + 1 end
   end
   return n
 end
@@ -99,7 +123,7 @@ function M.mark_seen(thread, side)
   if not thread.id then return end
   local state = state_of(side, thread.id)
   for _, c in ipairs(thread.comments) do
-    if c.source == "remote" and c.id then state.seen[c.id] = true end
+    if c.source == "remote" and c.id then state.seen[c.id] = M.text_hash(c.body) end
   end
   state.seen_status = true
 end
@@ -112,6 +136,7 @@ end
 ---@field resolved_by string? set while someone else's resolve is unseen
 ---@field new boolean the thread does not exist on the remote yet
 ---@field orphan boolean
+---@field local_only boolean a thread for the agent, never published
 
 --- Everything a view needs to know about a thread's state.
 ---@param thread review_notes.Thread
@@ -122,12 +147,13 @@ function M.flags(thread, state)
   return {
     unread = M.is_unread(thread, state),
     proposed = has_source(thread, "proposed"),
-    unsent = has_source(thread, "local")
+    unsent = (has_source(thread, "local") and not M.local_only(thread))
       or (thread.id ~= nil and state ~= nil and thread.status ~= state.status),
     resolved = thread.status == "resolved",
     resolved_by = unseen and state and state.resolved_by or nil,
     new = thread.id == nil or thread.orphan == true,
     orphan = thread.orphan == true,
+    local_only = M.local_only(thread),
   }
 end
 
@@ -274,6 +300,7 @@ end
 
 --- What publish would send. A proposed comment is never sent, and while a
 --- thread has one its status change is held too, so approving takes one step.
+--- Notes are never sent, and a thread started with one not at all.
 --- Unread never blocks: it only marks the item stale, for a per-thread
 --- confirm in the summary.
 ---@param doc review_notes.Doc
@@ -282,6 +309,7 @@ end
 function M.plan(doc, side)
   local plan = { items = {}, held = {} }
   for _, t in ipairs(doc.threads) do
+    if M.local_only(t) then goto continue end
     local id = not t.orphan and t.id or nil
     local state = id and side.threads[id] or nil
     local stale = state ~= nil and M.unread_count(t, state) > 0
@@ -303,6 +331,7 @@ function M.plan(doc, side)
     if id and state and not proposed and t.status ~= state.status then
       table.insert(plan.items, { kind = t.status == "resolved" and "resolve" or "unresolve", thread = t })
     end
+    ::continue::
   end
   return plan
 end
@@ -368,14 +397,22 @@ end
 
 -- Approve ---------------------------------------------------------------
 
---- Turn the proposed comments of a thread into mine, so publish sends them.
+--- Turn the proposed comments of a thread into mine. On a thread that
+--- publishes, approving means "send it": they become local comments. On a
+--- local-only thread it means "agreed": they become notes. So does it on a
+--- finding (a new thread a tool started) while *private*: the review has no
+--- MR yet.
 ---@param thread review_notes.Thread
+---@param private boolean?
 ---@return integer approved
-function M.approve(thread)
+function M.approve(thread, private)
+  local first = thread.comments[1]
+  local finding = thread.id == nil and first ~= nil and first.source == "proposed"
+  local to = (M.local_only(thread) or (private and finding)) and "note" or "local"
   local n = 0
   for _, c in ipairs(thread.comments) do
     if c.source == "proposed" then
-      c.source = "local"
+      c.source = to
       n = n + 1
     end
   end

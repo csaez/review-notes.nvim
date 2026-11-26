@@ -26,7 +26,7 @@ Subcommands:
     mr approve [REF] [-m MSG]
                             Approve the MR of the current branch, optionally commenting.
     mr info [REF] --json    The MR of the current branch: {ref, iid, title, url,
-                            source, target, author, state, draft, me,
+                            source, target, author, sha, state, draft, me,
                             reviewers, approved, approved_by, approvals_left};
                             the latest merged or closed one when none is open.
     comment list [--mr IID] [--json] [--with-mr]
@@ -846,6 +846,7 @@ def mr_info(repo: Repo, mr: dict, review: dict | None = None) -> dict:
         "source": mr.get("source_branch"),
         "target": f"origin/{mr['target_branch']}" if mr.get("target_branch") else None,
         "author": (mr.get("author") or {}).get("username"),
+        "sha": mr.get("sha"),
         "state": mr.get("state"),
         "draft": bool(mr.get("draft")),
     }

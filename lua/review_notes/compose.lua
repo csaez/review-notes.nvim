@@ -6,11 +6,14 @@ local M = {}
 ---@class review_notes.ComposeOpts
 ---@field title string
 ---@field text string? initial text
----@field on_save fun(text: string) called on every save with the trimmed text
+---@field on_save fun(text: string, note: boolean) called on every save with the trimmed text
+---@field note boolean? start as a note for the agent (never published)
+---@field fixed boolean? the kind cannot be switched
 ---@field win integer? open at the bottom of this window, at its width (default: under the cursor)
 
 --- Open the composer. `:w` or `<C-s>` saves and closes, `q` closes (`:q!`
---- when there are unsaved changes).
+--- when there are unsaved changes), `<C-t>` switches between a comment for
+--- the remote and a note for the agent.
 ---@param opts review_notes.ComposeOpts
 function M.open(opts)
   local buf = vim.api.nvim_create_buf(false, true)
@@ -32,13 +35,16 @@ function M.open(opts)
     height = math.min(height, math.max(3, vim.api.nvim_win_get_height(host) - 4))
     place = { relative = "win", win = host, row = vim.api.nvim_win_get_height(host) - height - 2, col = 0 }
   end
+  local note = opts.note == true
+  local function title() return " " .. opts.title .. (note and " (note for the agent)" or "") .. " " end
+  local footer = opts.fixed and " <C-s> save  q close " or " <C-s> save  <C-t> note/comment  q close "
   local win = vim.api.nvim_open_win(buf, true, vim.tbl_extend("force", place, {
     width = width,
     height = height,
     style = "minimal",
     border = "rounded",
-    title = " " .. opts.title .. " ",
-    footer = " <C-s> save  q close ",
+    title = title(),
+    footer = footer,
     footer_pos = "right",
   }))
   vim.wo[win].wrap = true
@@ -49,11 +55,17 @@ function M.open(opts)
     local text = vim.trim(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
     vim.bo[buf].modified = false
     if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
-    opts.on_save(text)
+    opts.on_save(text, note)
   end
   vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = save })
   local function map(mode, lhs, fn) vim.keymap.set(mode, lhs, fn, { buffer = buf, nowait = true }) end
   map({ "n", "i" }, "<C-s>", save)
+  if not opts.fixed then
+    map({ "n", "i" }, "<C-t>", function()
+      note = not note
+      vim.api.nvim_win_set_config(win, { title = title() })
+    end)
+  end
   map("n", "q", function()
     if vim.bo[buf].modified then
       vim.notify("unsaved text: <C-s> saves, :q! discards", vim.log.levels.WARN, { title = "review" })

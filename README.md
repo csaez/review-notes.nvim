@@ -45,10 +45,15 @@ file, scripts and coding agents can read and answer them too.
   what it created).
 - **Agents propose, you approve.** What a tool writes is a proposed comment:
   never published until you approve it.
+- **Notes for the agent stay local.** A note (`me (note)`) is for the agent
+  only and never published; a thread started with one is local only. Before
+  the branch has an MR, new threads start as notes, and approving an agent's
+  finding means "agreed", not "send".
 - **Unread is a highlight, not a gate.** Threads with comments you have not
   seen are marked, and `]r` goes through them.
 - **Notes outside the code.** No markers in your sources. Each branch has its
-  own file, `.git/review/<branch>.md`. Any other file gets a sibling
+  own file, `.git/review/<branch>.md` (in the main checkout's git dir, so
+  removing a worktree keeps it). Any other file gets a sibling
   `<file>.review.md`, local only.
 - **Follows your edits.** Anchors move with the code, saving writes the new
   lines back. Works next to gitsigns, diff pickers and hunk previews.
@@ -199,7 +204,10 @@ its most urgent state on the last line. `signs = false` hides them.
 
 The composer is a small markdown float: `<C-s>` or `:w` saves into the notes
 file (nothing is sent), `q` closes. Saving again edits your pending comment;
-saving it empty removes it.
+saving it empty removes it. `<C-t>` switches between a comment for the MR and
+a note for the agent (the title says which). It starts as a note on a
+local-only thread (and stays one), and on a new thread while the branch has
+no MR.
 
 ### Commands
 
@@ -235,9 +243,17 @@ have not published.
   Automatic pulls keep retrying every `auto_pull` seconds; a hung request is
   stopped after `timeout` seconds. Publish pulls first, so it sends nothing
   while offline. Your notes are never touched by a failed pull.
-- **No access, no MR, not GitLab.** A pull that fails because the token has
-  no access, the branch has no MR, or the repository is not on GitLab pauses
-  automatic pulls (retrying cannot help); `p` checks again.
+- **No MR yet.** Not a failure: the list says `no merge request yet`,
+  automatic pulls go on quietly and bring the threads in once the MR exists.
+- **No access, not GitLab.** A pull that fails because the token has no
+  access, or the repository is not on GitLab, pauses automatic pulls
+  (retrying cannot help); `p` checks again.
+- **Your checkout vs the MR.** With the MR's head commit known (`sha`), the
+  header says when your checkout is ahead (not pushed) or behind (update
+  it), and publish's confirm warns: line comments may be refused, and
+  replies may point at commits peers cannot see.
+- **Edited comments.** A comment a peer edits after you read it is unread
+  again, and a reply you wrote before the edit is flagged in publish.
 - **Approvals and reviewers.** The list's header says who reviews the MR and
   who approved it (`approved by @bo  reviewers: me, @bo`), refreshed by
   every pull, so a peer approving while you review shows up within
@@ -251,7 +267,14 @@ have not published.
   whether to move the review to it, and says which threads leave the notes
   (they stay on the old MR) and which of yours publish as new threads.
 - **Proposed** comments are not sent, and neither is the resolve of a thread
-  while it has one, so approving takes a single step.
+  while it has one, so approving takes a single step. **Notes** are never
+  sent.
+- **Checkpoints.** Publish records the commit you published at, and pi's
+  `/fixup` the commit it started from, as refs (`refs/review-notes/<branch>/
+  publish`, `.../fixup`). `f` then offers them as diff bases next to the MR
+  target: "since my last publish", "since the agent's last fixup". After a
+  rebase the checkpoint is replayed onto the new base, so the diff shows the
+  author's changes and not upstream's (needs git 2.38).
 - **Line numbers.** Anchors keep the lines you see, which follow your edits.
   A thread takes the remote's location only when yours is plainly wrong
   (another file, or no line at all). A thread whose lines were deleted stays
@@ -290,8 +313,9 @@ Matches the studio default, I added a comment above the constant.
 - `status: open|resolved` follows. A difference with the remote's status
   (kept in the sidecar) is a resolve or reopen not published yet.
 - `### @author` is a remote comment (`mine` marks my own), `### me (local)`
-  is mine and not published, `### me (proposed)` is a tool's, waiting for
-  approval. Body lines that start with `#` are written with a leading `\`.
+  is mine and not published, `### me (note)` is mine for the agent (never
+  published), `### me (proposed)` is a tool's, waiting for
+  approval. A thread whose first comment is a note is local only. Body lines that start with `#` are written with a leading `\`.
 - Plain text under a `##` heading with no `###` is read as one local
   comment, so a hand-written thread works.
 - `<branch>.json` next to it keeps the remote ids and what you have seen. It
@@ -342,8 +366,9 @@ require("review_notes").setup({
     },
   },
   -- `f` in the list: the changed files, with your picker. Not set by default.
+  -- `review.base` is the base picked: the MR target, or a checkpoint.
   files = function(review)
-    Snacks.picker.git_diff({ base = review.mr and review.mr.target })
+    Snacks.picker.git_diff({ base = review.base })
   end,
 })
 ```
@@ -385,7 +410,9 @@ require("review_notes").setup({
   `closed` stops automatic pulls, and `successor` (the branch's new MR)
   offers to move the review there. `me`, `reviewers`, `approved_by` and
   `approvals_left` (all optional) feed the header's review line and the
-  "approved by a peer" warnings.
+  "approved by a peer" warnings. `author` (who opened the MR) lets agents
+  tell your MR from a peer's; `sha` (the MR's head commit) feeds the
+  ahead / behind warnings.
 - Exit status says why a command failed: 3 the remote is unreachable, 4 no
   access, 5 no such MR, 6 the repository has no such remote (a GitHub
   repository for git-lab); anything else is an error. A command stopped by
@@ -494,9 +521,15 @@ the [pi](https://github.com/earendil-works/pi) coding agent. It works on the
 same notes files:
 
 - `/review [request]` reviews the code and adds its findings as proposed
-  comments for you to approve.
-- `/fixup [scope]` goes through the open threads where pi has not spoken
-  last, most severe first, and treats each by the tag it was filed with:
+  comments for you to approve. On a peer's MR it first re-checks your open
+  threads the author answered: a proposed resolve, or a reply saying what
+  is still missing.
+- `/fixup [scope]` is for your own branch (it refuses on a peer's MR, from
+  the MR's `author`). It goes through the open threads that are its turn,
+  most severe first: those whose last word is a note of yours, or your
+  unpublished comment before the MR, or a peer's comment on your MR. Your
+  published reply last means the thread waits for the peer, so pi leaves it
+  alone. It treats each by the tag it was filed with:
   - `FIX`: must be done. If it cannot be, the reply says why and the thread
     stays open.
   - `CHECK`: verified first; a real problem is fixed, otherwise the reply
