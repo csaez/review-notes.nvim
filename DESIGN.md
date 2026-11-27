@@ -140,8 +140,9 @@ One window on the right of the tabpage, owned by the plugin
 code window is the last normal window entered; showing a thread shows its
 anchor there. The window has `winfixbuf`, so nothing opens a file in it.
 
-- `:Review` steps one level, like `<Esc>` in lazygit: code to list, thread
-  to list, list to closed. `q` steps back too.
+- `:Review` steps one level, like `<Esc>` in lazygit: code to list (or to
+  the thread at the cursor), thread to list, list to closed. `q` steps back
+  too.
 - Both buffers redraw on any change to the notes or sidecar (file watcher),
   so pulls and agents show up live.
 - **Finding the keys**, from lazygit: the sidebar's `statusline` is a hint

@@ -195,10 +195,22 @@ function M.next(dir)
   if sidebar.is_open() then thread.show(ctx, target.entry.key, { follow = false }) end
 end
 
---- The sidebar with the list of the current review: every thread, the
---- review-wide actions. One level at a time: from a thread in the sidebar,
---- back to the list; from the list, closes it.
-function M.toggle() list_mode.toggle() end
+--- The sidebar, one level at a time. From the code: the thread at the
+--- cursor (the list on the first one when several cover the line), else the
+--- list of the current review; from a thread, back to the list; from the
+--- list, closes it.
+function M.toggle()
+  local buf = vim.api.nvim_get_current_buf()
+  local ctx = contexts[buf]
+  if ctx and vim.api.nvim_get_current_win() ~= sidebar.win() then
+    local here = signs.at(buf, vim.api.nvim_win_get_cursor(0)[1] - 1)
+    -- The sidebar takes the focus so the next toggle steps back to the list
+    -- instead of showing this thread again.
+    if #here == 1 then return thread.show(ctx, here[1].entry.key, { follow = false, focus = "sidebar" }) end
+    if #here > 1 then return list_mode.open(ctx, { key = here[1].entry.key }) end
+  end
+  list_mode.toggle()
+end
 
 --- Open the sidebar on the list of the current review, and go there.
 function M.open() list_mode.open() end

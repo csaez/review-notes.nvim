@@ -55,8 +55,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   lazy = false, -- signs are drawn when files open
   opts = {},
   keys = {
-    { "<leader>rr", function() require("review_notes").toggle() end, desc = "Review: sidebar" },
-    { "<leader>rt", function() require("review_notes").thread() end, desc = "Review: thread here" },
+    { "<leader>rr", function() require("review_notes").toggle() end, desc = "Review: sidebar (the thread here, if any)" },
     { "<leader>rn", function() require("review_notes").new() end, mode = { "n", "x" }, desc = "Review: new thread" },
     { "<leader>rN", function() require("review_notes").new_change() end, desc = "Review: new thread on the change" },
     { "]r", function() require("review_notes").next(1) end, desc = "Review: next thread (unread first)" },
