@@ -52,13 +52,10 @@ describe("parse", function()
     assert.are.equal(3, #doc.threads)
   end)
 
-  it("reads private comments, under the old name `me (note)` too", function()
+  it("reads private comments", function()
     local c = doc.threads[3].comments
     assert.are.same({ "local", "private" }, { c[1].source, c[2].source })
     assert.are.equal("for the agent", c[2].body)
-    local old = store.parse({ "## a.c:1", "status: open", "", "### me (note)", "x" })
-    assert.are.equal("private", old.threads[1].comments[1].source)
-    assert.truthy(table.concat(store.render(old), "\n"):find("### me (private)", 1, true))
   end)
 
   it("treats the change like any other thread", function()

@@ -28,8 +28,7 @@
 -- `moved`. A thread without `id` is new. A body line that starts with `#` is
 -- written with a leading `\`. A thread with text but no `###` section is read
 -- as one local comment, so a hand-written thread works. A thread whose first
--- comment is private is private: publish never sends any of it. `me (note)`,
--- the old name of `me (private)`, is still read.
+-- comment is private is private: publish never sends any of it.
 local M = {}
 
 local uv = vim.uv or vim.loop
@@ -148,7 +147,6 @@ local function parse_comment(heading, body)
   local who, attrs = split_attrs(heading)
   local c = { source = "remote", body = body_of(body) }
   local mine = who:match("^me%s*%((%a+)%)$")
-  if mine == "note" then mine = "private" end
   if mine == "local" or mine == "proposed" or mine == "private" then
     c.source = mine
   elseif who == "me" then
