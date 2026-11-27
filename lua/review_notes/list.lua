@@ -54,12 +54,16 @@ local function ago(t)
   return ("%d h ago"):format(math.floor(s / 3600))
 end
 
---- The sync line: when it last worked, and why it fails now.
+local function at(users)
+  return table.concat(vim.tbl_map(function(u) return "@" .. u end, users), ", ")
+end
+
+--- The sync line: when it last worked, why it fails now, what it brought.
 ---@return string text, string hl
 local function sync_line(ctx)
   local s = sync.state(ctx)
-  local at = sync.pulled_at[ctx.path]
-  local last = at and ("pulled " .. ago(at)) or "not pulled this session"
+  local pulled = sync.pulled_at[ctx.path]
+  local last = pulled and ("pulled " .. ago(pulled)) or "not pulled this session"
   if s.running then return "pulling...  (" .. last .. ")", "Comment" end
   if s.failing then
     local why = ({
@@ -72,11 +76,15 @@ local function sync_line(ctx)
     return ("%s%s  (%s)"):format(why, paused, last), s.kind == "no_mr" and "Comment" or "DiagnosticWarn"
   end
   if sync.ended(s.mr) then return last .. ", automatic pulls stopped", "Comment" end
-  return last, "Comment"
-end
-
-local function at(users)
-  return table.concat(vim.tbl_map(function(u) return "@" .. u end, users), ", ")
+  -- What the last pull brought: pulls tell it here, not in a notification.
+  local r = s.report
+  if not r then return last, "Comment" end
+  local news = {}
+  if r.added > 0 then table.insert(news, r.added .. " new") end
+  if r.changed > 0 then table.insert(news, r.changed .. " updated") end
+  if #r.approved > 0 then table.insert(news, "approved by " .. at(r.approved)) end
+  return last .. ": " .. (#news > 0 and table.concat(news, ", ") or "nothing new"),
+    #r.approved > 0 and "DiagnosticWarn" or "Comment"
 end
 
 --- Who reviews and who approved: what to know before picking a review up.
@@ -522,6 +530,12 @@ end
 function M.foldtext()
   return vim.fn.getline(vim.v.foldstart) .. "  ..."
 end
+
+sync.set_shown(function(ctx)
+  local win = sidebar.win()
+  local h = win and lists[vim.api.nvim_win_get_buf(win)]
+  return h ~= nil and h.ctx.path == ctx.path
+end)
 
 review.on_change(redraw_all)
 -- A pull came back: redraw, and reload the MR when the review moved to

@@ -90,7 +90,10 @@ A three-way merge ([`merge.lua`](lua/review_notes/merge.lua)):
 Because pull is safe, it also runs unasked: on focus and on entering the
 list, when the last attempt is older than `auto_pull` seconds, and never
 while the notes have unsaved edits in a buffer. It reports only what
-changed.
+changed, on the list's sync line; a notification only when the list of
+that review is not in view (it would cover the list it repeats), or for
+what the list cannot show: a failed pull I asked for, threads kept after
+the remote deleted them.
 
 Failures are told apart by exit status (contract in
 [`config.lua`](lua/review_notes/config.lua)): offline and "no MR yet" keep

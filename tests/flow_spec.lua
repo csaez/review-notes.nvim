@@ -283,7 +283,7 @@ describe("pull and publish", function()
       wait_for(function() return doc().threads[1].orphan == true end, "orphan")
     end)
 
-    it("a peer approving while I review is said once, in the list and before publish", function()
+    it("a peer approving while I review is said once, in the list (not notified over it) and before publish", function()
       local sync = require("review_notes.sync")
       local ctx = require("review_notes.review").context()
       local mr = { iid = 12, ref = "!12", state = "opened", me = "me", reviewers = { "me" }, approved_by = {}, approvals_left = 1 }
@@ -295,17 +295,17 @@ describe("pull and publish", function()
       require("review_notes.list").open(ctx)
       local function header() return table.concat(vim.api.nvim_buf_get_lines(0, 0, 6, false), "\n") end
       assert.truthy(header():find("1 approval left  reviewer: me", 1, true))
+      assert.are.same({}, warns)
       -- bo approves meanwhile.
       mr.approved_by, mr.approvals_left, mr.reviewers = { "bo" }, 0, { "me", "bo" }
       write_mr(mr)
       review.pull()
-      wait_for(function() return #warns == 1 end, "warning")
-      assert.truthy(warns[1]:find("MR !12 approved by @bo", 1, true))
-      wait_for(function() return header():find("approved by @bo", 1, true) ~= nil end, "header")
+      wait_for(function() return header():find("pulled just now: approved by @bo", 1, true) ~= nil end, "sync line")
       assert.truthy(header():find("reviewers: me, @bo", 1, true))
       review.pull()
       wait_for(function() return #calls() == 3 and not sync.state(ctx).running end, "third pull")
-      assert.are.equal(1, #warns)
+      wait_for(function() return header():find("pulled just now: nothing new", 1, true) ~= nil end, "sync line")
+      assert.are.same({}, warns)
       store.update(notes_path, function(d)
         table.insert(d.threads, { anchor = { path = "a.c", line = 1 }, status = "open", comments = { { source = "local", body = "x" } } })
       end)
@@ -316,6 +316,28 @@ describe("pull and publish", function()
       vim.notify = notify
       require("review_notes.sidebar").close()
       assert.truthy(prompt:find("MR !12 is already approved by @bo", 1, true))
+    end)
+
+    it("tells a pull in a notification with the list closed, on the sync line with it open", function()
+      local sync = require("review_notes.sync")
+      local ctx = require("review_notes.review").context()
+      write_mr({ iid = 12, ref = "!12", state = "opened" })
+      write_threads({ remote("t1", "a.c", 1, { "al", "why?" }) })
+      local notify, msgs = vim.notify, {}
+      vim.notify = function(m) table.insert(msgs, m) end
+      review.pull()
+      wait_for(function() return #calls() == 1 and not sync.state(ctx).running end, "pull")
+      assert.truthy(table.concat(msgs, "\n"):find("pulled: 1 new threads", 1, true))
+      msgs = {}
+      require("review_notes.list").open(ctx)
+      write_threads({ remote("t1", "a.c", 1, { "al", "why?" }), remote("t2", "a.c", 1, { "bo", "and?" }) })
+      review.pull()
+      wait_for(function() return #calls() == 2 and not sync.state(ctx).running end, "second pull")
+      local lines = table.concat(vim.api.nvim_buf_get_lines(0, 0, 6, false), "\n")
+      require("review_notes.sidebar").close()
+      vim.notify = notify
+      assert.are.same({}, msgs)
+      assert.truthy(lines:find("pulled just now: 1 new", 1, true))
     end)
 
     it("warns on the first pull of an MR approved before I came, not about my own approval", function()

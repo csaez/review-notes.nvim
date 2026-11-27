@@ -38,6 +38,12 @@ M.pulled_at = {}
 ---@field mr review_notes.MrRecord|false|nil the MR the review is on, from
 ---  the sidecar (false: none recorded)
 ---@field declined string? the successor MR I chose not to move to, this session
+---@field report review_notes.PullReport? what the last pull that worked brought
+
+---@class review_notes.PullReport
+---@field added integer
+---@field changed integer
+---@field approved string[] peers whose approval is new
 
 ---@type table<string, review_notes.PullState> by notes path
 local pulls = {}
@@ -59,6 +65,19 @@ function M.on_status(fn) table.insert(status_listeners, fn) end
 
 local function status_changed()
   for _, fn in ipairs(status_listeners) do fn() end
+end
+
+local shown = function(_) return false end ---@type fun(ctx: review_notes.Context): boolean
+
+--- *fn* says whether the list of a review is in view. What the list shows
+--- (the sync line, the approvals) is then not notified as well: a
+--- notification would cover the list it repeats.
+---@param fn fun(ctx: review_notes.Context): boolean
+function M.set_shown(fn) shown = fn end
+
+--- Notify what the list of *ctx* also shows, unless it is in view.
+local function tell(ctx, msg, level)
+  if not shown(ctx) then notify(msg, level) end
 end
 
 --- How syncing *ctx* goes: running, failing and why, the MR it is on.
@@ -160,12 +179,13 @@ local function pull(ctx, mode)
     s.paused = s.kind == "no_access" or s.kind == "no_remote"
     if s.kind == "no_mr" then
       -- Not a failure: the branch has no MR yet. Only a manual pull says so.
-      if mode == nil then notify("no merge request for this branch yet: nothing to pull") end
+      if mode == nil then tell(ctx, "no merge request for this branch yet: nothing to pull") end
     -- Automatic pulls report a failure once, and again when its kind changes.
     elseif not (mode == "auto" and s.failing and was == s.kind) then
       local msg = (mode == "auto" and "automatic pull failed: " or "pull failed: ") .. s.error
       if mode == "auto" and s.paused then msg = msg .. "\nautomatic pulls paused: pull to check again" end
-      notify(msg, mode == "auto" and vim.log.levels.WARN or vim.log.levels.ERROR)
+      -- A failure I asked for is always said; an automatic one is on the sync line.
+      if mode == "auto" then tell(ctx, msg, vim.log.levels.WARN) else notify(msg, vim.log.levels.ERROR) end
     end
     s.failing = true
     status_changed()
@@ -177,6 +197,7 @@ local function pull(ctx, mode)
     return pull(ctx, mode)
   end
   M.pulled_at[ctx.path] = os.time()
+  local fresh = {}
   if mr then
     local recorded = vim.deepcopy(mr)
     recorded.successor = nil
@@ -187,25 +208,27 @@ local function pull(ctx, mode)
     if s.mr and s.mr.iid == recorded.iid then
       for _, u in ipairs(peer_approvals(s.mr)) do known[u] = true end
     end
-    local fresh = vim.tbl_filter(function(u) return not known[u] end, peer_approvals(recorded))
+    fresh = vim.tbl_filter(function(u) return not known[u] end, peer_approvals(recorded))
     if #fresh > 0 then
-      notify(("MR %s approved by %s"):format(recorded.ref or "",
+      tell(ctx, ("MR %s approved by %s"):format(recorded.ref or "",
         table.concat(vim.tbl_map(function(u) return "@" .. u end, fresh), ", ")), vim.log.levels.WARN)
     end
     s.mr = recorded
   end
   s.paused = ended(s.mr)
   if s.paused and not was_ended and not (mr and mr.successor) then
-    notify(("MR %s is %s: automatic pulls stopped; threads still pull and publish to it")
+    tell(ctx, ("MR %s is %s: automatic pulls stopped; threads still pull and publish to it")
       :format(s.mr.ref or "", s.mr.state), vim.log.levels.WARN)
   end
-  status_changed()
   local report = review.edit(ctx, function(doc, side)
     if mr then side.mr = s.mr end
     return merge.pull(doc, side, list)
   end)
+  s.report = { added = report.added, changed = report.changed, approved = fresh }
+  status_changed()
   local news = report.added + report.changed + #report.orphaned > 0
-  if mode ~= "quiet" and (news or mode ~= "auto") then
+  -- The list shows the counts; which threads were kept is only said here.
+  if mode ~= "quiet" and (news or mode ~= "auto") and (#report.orphaned > 0 or not shown(ctx)) then
     local unread = 0
     for _, item in ipairs(review.items(ctx)) do
       if item.state == "unread" then unread = unread + 1 end
@@ -259,8 +282,8 @@ function M.pull(ctx)
   ctx = git_review(ctx)
   if not ctx then return end
   vim.cmd("silent! wall")
-  if pull_state(ctx).running then return notify("a pull is under way") end
-  notify("pulling...")
+  if pull_state(ctx).running then return tell(ctx, "a pull is under way") end
+  tell(ctx, "pulling...")
   backend.async(function() pull(ctx) end)
 end
 
