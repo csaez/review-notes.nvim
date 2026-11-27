@@ -459,6 +459,7 @@ local function ensure_buf(ctx)
   vim.bo[buf].bufhidden = "hide"
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = "reviewlist"
+  vim.bo[buf].formatlistpat = [[^  \S\+\s\+]]
   lists[buf] = { ctx = ctx, rows = {}, folded = {}, want = true, keys = {} }
   review.bind(buf, ctx)
   sidebar.register(buf)
@@ -494,7 +495,12 @@ function M.open(ctx, opts)
   sidebar.show(buf, {
     focus = opts.focus ~= false,
     wo = {
-      wrap = false,
+      -- Titles and summaries are longer than the sidebar is wide. A row's
+      -- continuation lines up under its text, past the anchor (formatlistpat).
+      wrap = true,
+      linebreak = true,
+      breakindent = true,
+      breakindentopt = "list:-1",
       cursorline = true,
       foldtext = "v:lua.require'review_notes.list'.foldtext()",
       fillchars = "fold: ",
