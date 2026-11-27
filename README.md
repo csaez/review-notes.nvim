@@ -2,12 +2,12 @@
 
 Code review for Neovim that lives in a plain text file, not in your code. The
 threads of a review (yours, your peers', an agent's) are in one place, a
-sidebar next to your code, and one file ties them to the merge request on the
-remote.
+sidebar next to your code, and one markdown file ties them to the merge
+request on the remote.
 
 Reading never sends anything. You pull to see what changed, write comments
-locally, and publish when you are ready. Because the notes are a markdown
-file, scripts and coding agents can read and answer them too.
+locally, and publish when you are ready. Because the notes are markdown,
+scripts and coding agents can read and answer them too.
 
 ```
  118 |   client.timeout = 30;            | Review  feature/timeouts
@@ -21,52 +21,29 @@ file, scripts and coding agents can read and answer them too.
                                          |   src/http.cpp:88  me (proposed): conn...
 ```
 
-`<CR>` on a row turns the sidebar into the thread, with its code on the left;
-`q` goes back to the list, and `q` there closes the sidebar.
-
 ## Features
 
-- **A sidebar for the review.** `:Review` opens a window on the right that
-  lists every thread by urgency (unread, proposed, not published, open,
-  resolved) and holds the review-wide actions: pull, publish, approve all,
-  the merge request. It never takes your code's window.
-- **One thread at a time.** `<CR>` shows a thread in the sidebar, with its
-  code next to it. Reply, resolve, approve, discard and move on with one key
-  each.
-- **Signs in the code.** A mark on each anchor, nothing else in your buffers.
+- **A sidebar for the review.** Every thread by urgency (unread, proposed,
+  not published, open, resolved), or one thread with its code next to it.
+  It never takes your code's window; code buffers only get signs.
 - **One kind of thread.** Comments on a line, a range, a file or the whole
-  change are all threads, and all work the same way.
-- **Pull is safe.** It never sends anything and never touches your text, so it
-  is fine to run in the middle of a peer or an agent adding comments. It also
-  runs on its own, quietly, when Neovim gets focus or you open the list and
-  the last pull is over a minute old (`auto_pull`).
-- **Publish is one deliberate step.** It shows what it will send, asks, and
-  sends new threads, replies and resolves in one go (one notification, only
-  what it created).
-- **Agents propose, you approve.** What a tool writes is a proposed comment:
-  never published until you approve it.
-- **Private comments are never published.** A private comment (`me
-  (private)`) is for you and the agent, never for peers; a thread started
-  with one is private as a whole. Before
-  the branch has an MR, new threads start as notes, and approving an agent's
-  finding means "agreed", not "send".
-- **Unread is a highlight, not a gate.** Threads with comments you have not
-  seen are marked, and `]r` goes through them.
-- **Notes outside the code.** No markers in your sources. Each branch has its
-  own file, `.git/review/<branch>.md` (in the main checkout's git dir, so
-  removing a worktree keeps it). Any other file gets a sibling
-  `<file>.review.md`, local only.
-- **Follows your edits.** Anchors move with the code, saving writes the new
-  lines back. Works next to gitsigns, diff pickers and hunk previews.
-- **Pluggable backend.** All remote work goes through command lines you
-  configure. A GitLab one ships as an extra.
+  change all work the same way.
+- **Safe pull.** Never sends, never touches your text; it also runs quietly
+  on focus.
+- **Deliberate publish.** Shows what it will send, asks, and sends it as one
+  review (one notification).
+- **Agents propose, you approve.** What a tool writes is never published
+  until you approve it. Private comments are never published at all.
+- **Notes outside the code.** One file per branch in the git dir, shared by
+  worktrees. Anchors follow your edits.
+- **Pluggable backend.** Remote work goes through command lines you
+  configure; a GitLab one ships in `extras/`.
 
 ## Requirements
 
-- Neovim 0.10 or newer
-- git
-- A [Nerd Font](https://www.nerdfonts.com/), for the default icons
-- To sync: a backend, such as the [git-lab extra](#git-lab)
+- Neovim 0.10+, git (2.38+ for checkpoints after a rebase)
+- A [Nerd Font](https://www.nerdfonts.com/) for the default icons
+- To sync: a backend, such as [git-lab](#extras)
 
 ## Installation
 
@@ -75,7 +52,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "csaez/review-notes.nvim",
-  lazy = false, -- signs are drawn when files open, so load at startup
+  lazy = false, -- signs are drawn when files open
   opts = {},
   keys = {
     { "<leader>rr", function() require("review_notes").toggle() end, desc = "Review: sidebar" },
@@ -88,95 +65,49 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-The plugin sets no global keymaps; its own buffers (the sidebar's list and
-thread, the composer) have their own keys. The sidebar shows the ones that
-apply in its bottom bar, and `?` lists them all.
-`:checkhealth review_notes` checks that git and the backend commands are found.
+The plugin sets no global keymaps. `:checkhealth review_notes` checks that
+git and the backend commands are found.
 
 ## Quick start
 
 1. Check out the branch under review and open a file.
-2. `<leader>rr` opens the sidebar on the list, which pulls the threads of the
-   merge request (`p` pulls again any time).
-3. `<CR>` on a thread shows it in the sidebar, with its code in the window on
-   the left. `r` replies, `x` resolves, `]t` moves to the next one, `q` goes
-   back to the list, and `q` there closes the sidebar.
-4. In the code, `<leader>rn` on a line (or a visual selection) starts a new
-   thread: write, save with `<C-s>`.
-5. Back in the list, `P` shows what will be sent and, once you confirm, sends it.
+2. `<leader>rr` opens the sidebar and pulls the merge request's threads.
+3. `<CR>` on a thread shows it, with its code on the left. `r` replies, `x`
+   resolves, `]t` moves on, `q` goes back (and closes from the list).
+4. In the code, `<leader>rn` on a line or selection starts a thread; save
+   with `<C-s>`.
+5. `P` in the list shows what will be sent and sends it once you confirm.
 
 ## Usage
 
-### The sidebar
+The sidebar's bottom bar shows the keys that apply to the thread at hand,
+and `?` lists every key (press one to run it). The main ones:
 
-`:Review` (or `toggle()`) opens a window on the right of the tab and moves
-there. Pressed again it goes back one level: from a thread to the list, from
-the list it closes the sidebar. It shows either the list of the review or
-one thread, and redraws when the notes change, so a pull or an agent writing
-shows up live. Code always goes to the code window, the last window you were
-in on a file (a new one when the sidebar is alone); nothing opens a file in
-the sidebar.
+| Key        | Where   | Does                                                   |
+| ---------- | ------- | ------------------------------------------------------ |
+| `<CR>` `o` | list    | show the thread (`o`: and go to the code)              |
+| `r`        | both    | reply, or edit my unpublished reply                    |
+| `x`        | both    | resolve / reopen                                       |
+| `a` `d`    | both    | approve the proposed comment / discard unpublished text |
+| `t`        | both    | make private (never published) / public                |
+| `R`        | list    | mark read                                              |
+| `p` `P`    | list    | pull / publish                                         |
+| `n`        | list    | new thread on the whole change                         |
+| `A` `D`    | list    | approve / discard every proposed comment               |
+| `m` `f`    | list    | MR actions / changed files (see Configuration)         |
+| `e`        | list    | edit the notes file                                    |
+| `]t` `]u`  | thread  | next thread / next unread (`[` for previous)           |
+| `q`        | both    | back one level                                         |
 
-### List mode
+Thread keys in the list take a visual selection (`Vjjx` resolves three).
+Search the list with `/`. In the composer, `<C-s>` or `:w` saves (nothing is
+sent), `<C-t>` switches public / private, `q` closes.
 
-The branch, the merge request and the counts, then the threads in sections
-by urgency, each a fold (`<Tab>`; Resolved starts folded). Long paths are cut
-from the left to fit.
+Commands: `:Review` (the sidebar), `:Review thread`, `:Review pull`,
+`:Review publish`, `:Review edit`.
 
-| Key       | Does                                                         |
-| --------- | ------------------------------------------------------------ |
-| `<CR>`    | show the thread (the sidebar switches to it, its code follows) |
-| `o`       | the same, and go to the code                                 |
-| `r`       | reply, or edit my reply not published yet                    |
-| `x`       | resolve / reopen; accepts a resolve by someone else          |
-| `a`       | approve proposed comments                                    |
-| `d`       | discard unpublished text (asks before deleting new threads)  |
-| `R`       | mark read                                                    |
-| `t`       | make private (never published) / public                      |
-| `p`       | pull (sends nothing)                                         |
-| `P`       | publish: summary, confirm, send                              |
-| `n`       | new thread on the whole change                               |
-| `A` / `D` | approve / discard every proposed comment                     |
-| `m`       | merge request actions (see [Configuration](#configuration))  |
-| `f`       | changed files (your function, see Configuration)             |
-| `e`       | edit the notes file (in the code window)                     |
-| `q`       | close the sidebar                                            |
-| `?`       | every key, to read or run (see below)                        |
-
-`x`, `a`, `d`, `R` and `t` also take a visual selection: `Vjjx` resolves
-three threads. To find a thread, search the list with `/`.
-
-### Thread mode
-
-One thread. Showing it marks it seen and shows its code (range highlighted)
-in the code window; threads on the whole change are threads like any other
-here. The bottom bar shows where you are in the list (`2 unread  3 of 19`).
-
-| Key        | Does                                                  |
-| ---------- | ----------------------------------------------------- |
-| `r`        | reply (the composer opens in the sidebar)             |
-| `x`        | resolve / reopen                                      |
-| `a`        | approve the proposed comment                          |
-| `d`        | discard my unpublished text (asks for a new thread, which goes entirely) |
-| `t`        | make private (never published) / public               |
-| `]t` `[t`  | next / previous thread (the list's order)             |
-| `]u` `[u`  | next / previous unread                                |
-| `o`        | go to the code                                        |
-| `q`        | back to the list, on this thread (`q` there closes the sidebar) |
-| `?`        | every key, to read or run (see below)                 |
-
-### Finding the keys
-
-As in lazygit, the bottom bar lists the common keys while the cursor is in
-the sidebar, and only those that apply to the thread at hand: `a approve`
-appears on a thread with a proposed comment, `R read` on an unread one, and
-`x` says whether it resolves or reopens. It is the sidebar's `statusline`,
-so with a global status line (`laststatus=3`) it takes over the bottom bar
-while the sidebar has the focus. Keys are highlighted with `ReviewKey`.
-
-A statusline plugin must leave the sidebar's filetypes alone, or it draws
-over the bar. For lualine (the winbar entry keeps the sidebar without a top
-bar, if you use one):
+The bottom bar is the sidebar's `statusline`, so exclude its filetypes from
+your statusline plugin. For lualine:
 
 ```lua
 options = {
@@ -187,121 +118,34 @@ options = {
 }
 ```
 
-`?` (or `g?`) opens every key of the mode, grouped. It stays open until
-`q` or `<Esc>`. Press a key there, or `<CR>` on its row, to run it on the
-thread under the cursor; `/` filters the list.
-
-### In the code
-
-Each thread on a line or range has a sign: a bar down the range, the icon of
-its most urgent state on the last line. `signs = false` hides them.
-
-| Function        | Does                                                         |
-| --------------- | ------------------------------------------------------------ |
-| `thread()`      | the thread at the cursor in the sidebar (a menu if several)  |
-| `new()`         | new thread on the line or the visual range, even where one is |
-| `new_change()`  | new thread on the whole change                               |
-| `next(dir)`     | next / previous unread thread across the review; with nothing unread, the next thread in the buffer |
-
-The composer is a small markdown float: `<C-s>` or `:w` saves into the notes
-file (nothing is sent), `q` closes. Saving again edits your pending comment;
-saving it empty removes it. `<C-t>` switches between public (published with
-the MR) and private (never published; the title says so). It starts private
-on a private thread (and stays so), and on a new thread while the branch has
-no MR. `t` in the sidebar switches it later: on a new thread it makes the
-whole thread private or public, on a published one it switches your reply
-not sent yet.
-
-### Commands
-
-| Command            | What it does                                              |
-| ------------------ | --------------------------------------------------------- |
-| `:Review`          | the sidebar: open, back to the list, close                |
-| `:Review pull`     | bring the remote threads in; never sends                  |
-| `:Review publish`  | pull, show what would be sent, confirm, send, pull        |
-| `:Review thread`   | the thread at the cursor in the sidebar                   |
-| `:Review edit`     | the notes file                                            |
-
 ## How syncing works
 
-The remote is the source of truth for the conversation. Your side is what you
-have not published.
+The remote is the source of truth for the conversation; your side is what
+you have not published.
 
-- **Pull** replaces each known thread's remote comments, adds new threads and
-  updates resolved state. Your local and proposed comments, and a resolve or
-  reopen you have not published, are never touched. A thread deleted on the
-  remote that holds your text stays, marked `orphan`, and publishes as a new
-  thread. A thread resolved by someone else comes in as "resolved by @name"
-  until you look at it.
-- **Publish** pulls first, lists what it would send and asks. A reply you
-  wrote on a thread that has since got unread comments is flagged in the list
-  and you can skip those. Unread never blocks anything else. With a backend
-  that has `submit` (git-lab does) everything is queued as drafts and
-  published together, only the drafts created here; if publishing fails the
-  leftovers are deleted, so retrying cannot post twice. If deleting them
-  fails too (the connection dropped), the report lists the drafts that may
-  still be pending on GitLab.
-- **Offline or no VPN.** Pulls fail quietly: one warning, then the list and
-  the statusline say `offline since HH:MM` and when the last pull worked.
-  Automatic pulls keep retrying every `auto_pull` seconds; a hung request is
-  stopped after `timeout` seconds. Publish pulls first, so it sends nothing
-  while offline. Your notes are never touched by a failed pull.
-- **No MR yet.** Not a failure: the list says `no merge request yet`,
-  automatic pulls go on quietly and bring the threads in once the MR exists.
-- **No access, not GitLab.** A pull that fails because the token has no
-  access, or the repository is not on GitLab, pauses automatic pulls
-  (retrying cannot help); `p` checks again.
-- **Your checkout vs the MR.** With the MR's head commit known (`sha`), the
-  header says when your checkout is ahead (not pushed) or behind (update
-  it), and publish's confirm warns: line comments may be refused, and
-  replies may point at commits peers cannot see.
-- **Edited comments.** A comment a peer edits after you read it is unread
-  again, and a reply you wrote before the edit is flagged in publish.
-- **Approvals and reviewers.** The list's header says who reviews the MR and
-  who approved it (`approved by @bo  reviewers: me, @bo`), refreshed by
-  every pull, so a peer approving while you review shows up within
-  `auto_pull` seconds, with one warning. Publish's confirm says so too, so
-  you can decide whether your comments still matter. `m r` assigns you as
-  reviewer, unless someone else reviews it already (`m R` joins anyway).
-- **Merged or closed MR.** A review remembers its MR (in the sidecar) and
-  keeps pulling and publishing to it by IID after it is merged or closed. The
-  list shows `!123 [merged]`, automatic pulls stop, and publish says the MR is
-  merged before it sends. If the branch has a new MR, a manual pull asks
-  whether to move the review to it, and says which threads leave the notes
-  (they stay on the old MR) and which of yours publish as new threads.
-- **Proposed** comments are not sent, and neither is the resolve of a thread
-  while it has one, so approving takes a single step. **Private** comments
-  are never sent.
-- **Checkpoints.** Publish records the commit you published at, and pi's
-  `/fixup` the commit it started from, as refs (`refs/review-notes/<branch>/
-  publish`, `.../fixup`). `f` then offers them as diff bases next to the MR
-  target: "since my last publish", "since the agent's last fixup". After a
-  rebase the checkpoint is replayed onto the new base, so the diff shows the
-  author's changes and not upstream's (needs git 2.38).
-- **Line numbers.** Anchors keep the lines you see, which follow your edits.
-  A thread takes the remote's location only when yours is plainly wrong
-  (another file, or no line at all). A thread whose lines were deleted stays
-  on the nearest line, marked `moved`.
+- **Pull** updates remote comments and statuses and adds new threads. Your
+  comments and unpublished resolves are never touched. It runs on its own
+  when the last pull is older than `auto_pull` seconds; offline, it retries
+  quietly and the list says so.
+- **Publish** pulls first, lists what it would send (flagging replies to
+  threads that changed meanwhile, a peer's approval, a checkout that differs
+  from the MR's head) and asks. Retrying after a failure cannot post twice.
+- **Proposed** comments are sent only once approved; **private** ones never.
+- **Checkpoints.** `f` offers "since my last publish" and "since the agent's
+  last fixup" as diff bases, replayed past a rebase.
+
+Details: [DESIGN.md](DESIGN.md).
 
 ## The notes file
 
-Markdown, so you can edit it by hand, grep it and diff it. Writes are atomic
-and redone if another process (an agent) wrote at the same time.
+`.git/review/<branch>.md` (in the main checkout's git dir), or
+`<file>.review.md` beside a file outside git:
 
 ```markdown
 # Review of feature/timeouts
 
-## change {id=ghi789}
-status: open
-
-### @alice {id=11}
-please add a changelog entry
-
-### me (local)
-done, see the next push
-
 ## src/http.cpp:120-124 {id=abc123}
-status: resolved
+status: open
 
 ### @alice {id=12}
 why 30s?
@@ -310,245 +154,57 @@ why 30s?
 Matches the studio default, I added a comment above the constant.
 ```
 
-- `## <anchor> {attrs}` starts a thread. The anchor is `change`, `path`,
-  `path:N` or `path:N-M`. Paths are relative to the repository root. `id=` is
-  the remote thread; none means it is new.
-- `status: open|resolved` follows. A difference with the remote's status
-  (kept in the sidecar) is a resolve or reopen not published yet.
-- `### @author` is a remote comment (`mine` marks my own), `### me (local)`
-  is mine and not published, `### me (private)` is mine and never published
-  (`me (note)`, its old name, is still read), `### me (proposed)` is a
-  tool's, waiting for approval. A thread whose first comment is private is
-  private as a whole. Body lines that start with `#` are written with a leading `\`.
-- Plain text under a `##` heading with no `###` is read as one local
-  comment, so a hand-written thread works.
-- `<branch>.json` next to it keeps the remote ids and what you have seen. It
-  is safe to delete: everything shows as unread afterwards.
-
-The full grammar is at the top of
-[`lua/review_notes/store.lua`](lua/review_notes/store.lua).
+Comments are `### @author` (remote), `### me (local)` (not published yet),
+`### me (private)` (never published) or `### me (proposed)` (a tool's,
+waiting for approval). Edit it by hand freely. The full grammar is at the
+top of [`store.lua`](lua/review_notes/store.lua). The `<branch>.json` beside
+it is safe to delete (everything shows as unread).
 
 ## Configuration
 
 ```lua
 require("review_notes").setup({
-  signs = true,   -- gutter marks on the anchors
-  watch = true,   -- redraw when a notes file changes (an agent, a pull)
-  -- Pull in the background on focus and on entering the list, when the last
-  -- pull is older than this many seconds; quiet unless threads came in.
-  -- false: only `p` / `:Review pull`.
-  auto_pull = 60,
-  -- A backend command still running after this many seconds is stopped and
-  -- counts as offline. false: no limit.
-  timeout = 30,
-  -- Command lines run in the repository root. {path}, {line}, {thread} and
-  -- {ids} are filled in, and {mr}: the IID of the review's MR (an argument
-  -- holding it is left out until the first pull reports it). Text goes on
-  -- stdin; structured output comes back as JSON on stdout.
-  backend = {
-    threads   = { "git-lab", "comment", "list", "--with-mr", "--mr={mr}" },
-    add       = { "git-lab", "comment", "add", "--mr={mr}", "--draft", "--json", "{path}:{line}", "-" },
-    general   = { "git-lab", "comment", "add", "--mr={mr}", "--draft", "--json", "-" },
-    reply     = { "git-lab", "comment", "reply", "--mr={mr}", "--draft", "--json", "{thread}", "-" },
-    resolve   = { "git-lab", "comment", "resolve", "--mr={mr}", "{thread}" },
-    unresolve = { "git-lab", "comment", "unresolve", "--mr={mr}", "{thread}" },
-    submit    = { "git-lab", "review", "submit", "--mr={mr}", "--only", "{ids}", "--json" },
-    discard   = { "git-lab", "review", "discard", "--mr={mr}", "--only", "{ids}" },
-  },
-  -- The merge request in the list (false: none). `info` prints JSON with
-  -- ref, title, url, target, and optionally state, me, reviewers,
-  -- approved_by, approvals_left; `actions` are under `m`. A `cmd` runs in the
-  -- repository root with {url}, {ref}, {target} filled in from `info`, and
-  -- {input} asked for first (left out with the option before it if empty).
-  mr = {
-    info = { "git-lab", "mr", "info", "--json", "!{mr}" },
-    actions = {
-      { key = "r", desc = "review it: assign me, unless someone else reviews it", cmd = { "git-lab", "mr", "review-assign", "--if-free", "{ref}" } },
-      { key = "R", desc = "review it with the others: assign me anyway", cmd = { "git-lab", "mr", "review-assign", "{ref}" } },
-      { key = "a", desc = "approve the MR (optional comment)", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
-      { key = "o", desc = "open in the browser", fn = function(mr) vim.ui.open(mr.url) end },
-    },
-  },
-  -- `f` in the list: the changed files, with your picker. Not set by default.
-  -- `review.base` is the base picked: the MR target, or a checkpoint.
-  files = function(review)
-    Snacks.picker.git_diff({ base = review.base })
-  end,
+  signs = true,    -- signs on the anchors
+  watch = true,    -- redraw when the notes change on disk
+  auto_pull = 60,  -- seconds between background pulls; false: manual only
+  timeout = 30,    -- seconds before a backend command counts as offline
+  backend = { ... }, -- command lines; defaults call git-lab
+  mr = { ... },      -- MR header and `m` actions; false: none
+  -- `f` in the list; review.base is the MR target or a checkpoint
+  files = function(review) Snacks.picker.git_diff({ base = review.base }) end,
 })
 ```
 
-### Writing your own backend
+Defaults and the backend contract (operations, JSON, exit statuses) are in
+[`config.lua`](lua/review_notes/config.lua): write your own backend for
+another forge from it.
 
-| Operation              | Input                          | Output on stdout                     |
-| ---------------------- | ------------------------------ | ------------------------------------ |
-| `threads`              | `{mr}`                         | JSON list of threads (see below), or `{"mr": ..., "threads": [...]}` |
-| `add`                  | `{path}`, `{line}`, text on stdin | `{"id": ...}`                     |
-| `general`              | text on stdin                  | `{"id": ...}`                        |
-| `reply`                | `{thread}`, text on stdin      | `{"id": ...}`                        |
-| `resolve`, `unresolve` | `{thread}`                     |                                      |
-| `submit` (optional)    | `{ids}`, comma-separated       | `{"published": [...]}`, also when it fails part way |
-| `discard` (optional)   | `{ids}`                        |                                      |
-
-```json
-{
-  "id": "abc123",
-  "path": "src/http.cpp",
-  "line": 124,
-  "start_line": 120,
-  "resolved": false,
-  "resolved_by": null,
-  "resolved_by_me": false,
-  "comments": [{ "id": "12", "author": "alice", "body": "why 30s?", "mine": false }]
-}
-```
-
-- `path` is `null` for a thread on the whole change, `line` is `0` for a whole
-  file. Lines refer to the files on disk.
-- Comment `id`s are what unread tracking uses: without them every pull shows
-  the thread as unread. `mine` keeps your own comments from counting as
-  unread. `start_line`, `resolved_by` and `resolved_by_me` are optional.
-- Without `submit`, each comment is published as soon as it is sent.
-- `threads` may wrap the list with the MR it belongs to:
-  `{"mr": {"iid": 12, "ref": "!12", "state": "merged", "successor": {"iid": 13, "ref": "!13"}}, "threads": [...]}`.
-  The review records it and passes `{mr}` from then on; `state` `merged` or
-  `closed` stops automatic pulls, and `successor` (the branch's new MR)
-  offers to move the review there. `me`, `reviewers`, `approved_by` and
-  `approvals_left` (all optional) feed the header's review line and the
-  "approved by a peer" warnings. `author` (who opened the MR) lets agents
-  tell your MR from a peer's; `sha` (the MR's head commit) feeds the
-  ahead / behind warnings.
-- Exit status says why a command failed: 3 the remote is unreachable, 4 no
-  access, 5 no such MR, 6 the repository has no such remote (a GitHub
-  repository for git-lab); anything else is an error. A command stopped by
-  `timeout` counts as unreachable.
-
-## Items API
-
-There is no finder: search the list with `/`. To build your own,
-`require("review_notes").items(buf)` returns every thread
-of the buffer's review, urgent first. Each item has `file`, `line`,
-`end_line`, `kind` (`change`, `file` or `line`), `anchor`, `state`, `icon`,
-`hl`, `tags`, `who`, `summary`, `thread` (the conversation as markdown lines,
-for a preview) and `text` (searchable: the anchor, tags and every comment). Threads with no code (the whole
-change, a directory such as a submodule) point at their heading in the notes
-file.
-
-- `open_item(item)` shows the thread in the sidebar and its code in the code
-  window, and marks it seen.
-- `goto_item(item)` does the same and goes to the code (`o` in the list).
-- `item_action(item, "resolve" | "read" | "approve" | "discard" | "toggle_private")` acts without
-  leaving your picker. Refresh its items afterwards.
-
-## Statusline
-
-`require("review_notes").status()` returns the unread, proposed and
-not-published counts of the current review. It reads cached counts, so it is
-cheap on every redraw:
-
-```lua
-sections = { lualine_x = { function() return require("review_notes").status() end } }
-```
-
-## Icons and highlights
-
-Icons and groups are in `require("review_notes").style`, one per state
-(`unread`, `proposed`, `unsent`, `open`, `resolved`). The groups are defined
-with `default = true`, so your colorscheme can override them: `ReviewUnread`,
-`ReviewProposed`, `ReviewUnsent`, `ReviewOpen`, `ReviewResolved`,
-`ReviewAuthor`, `ReviewMine`, `ReviewText`, `ReviewRange` (the code of the
-thread in the sidebar), `ReviewKey` (keys in the hint bar).
+**API.** `require("review_notes")` also offers `items(buf)` (every thread,
+for your own picker), `open_item`, `goto_item`, `item_action`, and
+`status()`, a cheap statusline component. Icons and highlight groups
+(`ReviewUnread`, `ReviewKey`, ...) are in `.style`, defined with
+`default = true` so colorschemes can override them. See
+[`init.lua`](lua/review_notes/init.lua).
 
 ## Extras
 
-Optional companions in [`extras/`](extras). The plugin works without them:
-nothing in `lua/` loads or requires them, and each is installed by hand.
+Optional, installed by hand; nothing in `lua/` requires them.
 
-### git-lab
-
-[`extras/git-lab`](extras/git-lab) is a single-file Python script (3.10 or
-newer, no dependencies) for GitLab merge request work from the command line.
-The plugin's default backend configuration calls it, and it also works on its
-own:
-
-```sh
-git-lab mr list                  # open MRs of this repository
-git-lab mr list --approvals      # ... with who approved and who reviews
-git-lab mr review-assign --if-free   # review the current MR, unless someone else does
-git-lab mr checkout '!123'       # check out an MR (also group/project!123, URL)
-git-lab mr target                # the target branch of the current MR (cached)
-git-lab mr target --refresh      # ask GitLab again, updating the cache
-git-lab mr approve -m "LGTM"
-git-lab mr info --json           # the current MR (or its last merged or closed one)
-git-lab comment list             # threads, with lines mapped to the files on disk
-git-lab comment list --with-mr   # {mr, threads}: the MR's state too
-git-lab comment add src/a.c:12 "why?"
-git-lab review submit            # publish pending draft comments
-```
-
-It finds the project from the `origin` remote and the merge request from the
-current branch. Set `GITLAB_HOST` to override the host and `GITLAB_TIMEOUT`
-for the seconds per request (default 10). It exits 3 when GitLab is
-unreachable, 4 without access, 5 when there is no such MR, 6 when the
-remote is not a GitLab server. Run
-`git-lab --help` for everything.
-
-`mr list` prints one MR per line, starting with its reference, so a picker
-works as a one-liner (`--recursive` includes submodules):
-
-```sh
-git-lab mr checkout "$(git-lab mr list --recursive | fzf | cut -f1)"
-```
-
-To install it, put it on your `PATH` and give it a token with `api` scope:
-
-```sh
-ln -s ~/.local/share/nvim/lazy/review-notes.nvim/extras/git-lab ~/.local/bin/git-lab
-export GITLAB_TOKEN=...
-```
-
-### pi extension
-
-[`extras/pi/review-notes.ts`](extras/pi/review-notes.ts) is an extension for
-the [pi](https://github.com/earendil-works/pi) coding agent. It works on the
-same notes files:
-
-- `/review [request]` reviews the code and adds its findings as proposed
-  comments for you to approve. On a peer's MR it first re-checks your open
-  threads the author answered: a proposed resolve, or a reply saying what
-  is still missing.
-- `/fixup [scope]` is for your own branch (it refuses on a peer's MR, from
-  the MR's `author`). It goes through the open threads that are its turn,
-  most severe first: those whose last word is a private comment of yours, or your
-  unpublished comment before the MR, or a peer's comment on your MR. Your
-  published reply last means the thread waits for the peer, so pi leaves it
-  alone. It treats each by the tag it was filed with:
-  - `FIX`: must be done. If it cannot be, the reply says why and the thread
-    stays open.
-  - `CHECK`: verified first; a real problem is fixed, otherwise the reply
-    gives the evidence.
-  - `CONSIDER`, `NIT`: optional. Done when clearly better and cheap,
-    otherwise declined with a reason.
-  - `QUESTION`: answered from the code.
-  - No tag (a peer's comment, or yours): a request, done unless unclear.
-
-  Threads on code become `fixup!` commits. Each handled thread gets a
-  proposed reply, and is resolved when fixed, verified or declined; one that
-  needs your decision stays open.
-
-pi acts on its own findings without waiting for approval: approval is only
-the gate before something goes to the merge request. Everything pi writes is
-a `### me (proposed)` comment, which publish never sends until you approve it
-(`a` in the sidebar, `A` in the list for all), so a round of pi is safe at
-any time. To
-install it, link or copy it into `~/.pi/agent/extensions/`.
+- **[`extras/git-lab`](extras/git-lab)**: a dependency-free Python 3.10+
+  script for GitLab MRs, and the default backend. Put it on your `PATH`
+  with `GITLAB_TOKEN` (`api` scope) set; `git-lab --help` lists its
+  commands (`mr list`, `mr checkout`, `mr approve`, `comment list`, ...).
+- **[`extras/pi/review-notes.ts`](extras/pi/review-notes.ts)**: a
+  [pi](https://github.com/earendil-works/pi) extension. `/review` adds
+  findings as proposed comments; `/fixup` answers the threads waiting on it
+  (its own findings included: approval only gates publishing) with
+  `fixup!` commits and proposed replies, on your own branch only.
+  Link it into `~/.pi/agent/extensions/`.
 
 ## Development
 
 ```sh
-make test
+make test   # needs plenary.nvim; PLENARY=/path overrides the lazy.nvim copy
 ```
 
-The tests need [plenary.nvim](https://github.com/nvim-lua/plenary.nvim). They
-look for it in lazy.nvim's data directory; set `PLENARY=/path/to/plenary.nvim`
-to use another copy. The specs run against a fake backend in
-`tests/fixtures/backend.sh`, so they never touch GitLab.
+The specs use a fake backend (`tests/fixtures/backend.sh`), never GitLab.

@@ -24,24 +24,12 @@ Every workflow combines two loops around one notes file per branch.
 | remote | me and peers    | the review platform: pull, publish | GitLab (`git-lab` backend) |
 
 - The agent (pi, Claude Code, ...) writes **proposed** comments and
-  commits; it never talks to the platform.
-- I write to the agent with **private** comments (`me (private)`): never
-  published. A thread started with one is private as a whole. Before the
-  MR, new threads start private.
-- The platform (GitLab, GitHub, ...) is the source of truth for the MR
-  (merge or pull request) and its threads. A backend is a CLI that speaks
-  the operations in README.md.
-- **Approve** means "send it" on a thread that publishes, "agreed" on a
-  private one or on a finding before the MR (the text becomes private).
-- **Whose turn:** the agent acts on an open thread when the last word that
-  is not its own is a private comment, my unpublished comment before the MR, or a
-  peer's comment on my MR. My published reply last waits for the peer.
-
-| Place       | What                                                           |
-| ----------- | -------------------------------------------------------------- |
-| notes file  | `<git-common-dir>/review/<branch>.md`: one per branch, shared by worktrees |
-| sidecar     | `<branch>.json` next to it: seen state, the MR                 |
-| checkpoints | `refs/review-notes/<branch>/{publish,fixup}`: diff bases under `f` |
+  commits; it never talks to the platform. I steer it with **private**
+  comments, never published.
+- The platform (GitLab, GitHub, ...) is the source of truth for the MR and
+  its threads, reached through a backend CLI.
+- Approve, whose turn, storage and checkpoints: DESIGN.md ("The two
+  loops", "Storage", "Checkpoints").
 
 "Agent review" and "agent fixup" are `/review` and `/fixup` in pi; `m r`,
 `m a` are MR actions configured to call the backend.
@@ -50,7 +38,8 @@ Every workflow combines two loops around one notes file per branch.
 
 ## A. Reviewing a peer's MR (remote, with a local loop inside)
 
-1. **Pick.** `<leader>rm` lists open MRs with reviewers and approvals;
+1. **Pick.** A picker over `git-lab mr list --approvals` (outside: my own
+   config, not the plugin) lists open MRs with reviewers and approvals;
    approved by a peer sorts last, dimmed.
 2. **Size it up.** Check it out (outside: `git-lab mr checkout`, fork MRs
    as `mr/IID`), in my checkout or a worktree. gitsigns against the
@@ -63,8 +52,8 @@ Every workflow combines two loops around one notes file per branch.
 5. **I review meanwhile.** `<leader>rn` on a line or selection,
    `<leader>rN` on the whole change; reply and resolve on peers' threads.
    Writing alongside the agent is safe (atomic writes, it only appends).
-6. **Triage the agent.** `d` what I disagree with, `r` to edit, `A` to
-   approve the rest.
+6. **Triage the agent.** `d` what I disagree with (then `r` to write my
+   own), `A` to approve the rest.
 7. **Publish.** `P`: pulls, shows the plan, confirms (warns if a peer
    approved meanwhile, the MR was merged or closed, or my checkout is not
    the MR's head), sends everything as drafts and submits them as one
@@ -88,11 +77,14 @@ Every workflow combines two loops around one notes file per branch.
 2. **Read the diff.** gitsigns against the target (the nearest protected
    branch while there is no MR).
 3. **Agent reviews.** `/review` on my branch: findings for me.
-4. **Self-review.** `<leader>rn` writes private comments for the agent; approve
-   (agreed, it stays private) or discard its findings. Nothing here can publish.
+4. **Self-review.** `<leader>rn` writes private comments for the agent;
+   discard the findings I disagree with. The rest need no approval: the
+   agent acts on its own findings (approving one only makes it private).
+   Nothing here can publish.
 5. **Agent fixes.** `/fixup` (clean tree): records the `fixup` checkpoint,
-   one `fixup!` commit per note's commit, a proposed reply and a resolve
-   per thread; unclear notes get a proposed question.
+   one `fixup!` commit per note's commit, a proposed reply per thread,
+   resolved when fixed, verified or declined; open when it needs my
+   decision, with a proposed question when unclear.
 6. **Check.** `f` "since the agent's last fixup", read its replies; reopen,
    add private comments; back to 5.
 
@@ -117,7 +109,7 @@ Every workflow combines two loops around one notes file per branch.
    `<file>.review.md` next to it, never published.
 2. `<leader>rn` in the document, or `/review` on the file.
 3. `/fixup` on the file edits it in place (no commits), with a proposed
-   reply and a resolve per note.
+   reply per note, resolved as in B5.
 
 ---
 

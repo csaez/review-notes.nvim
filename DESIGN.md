@@ -1,520 +1,217 @@
 # review-notes.nvim: design
 
-This document describes the design as it is now; it is kept current, not a
-history.
-The README is the user documentation; WORKFLOWS.md walks through how it is
-used end to end, and the gaps that shows. Backward compatibility of commands,
-keymaps and options is not a goal; the notes file format stays.
+How the plugin works and why, as it is now (kept current, not a history).
+[README.md](README.md) is the user documentation, [WORKFLOWS.md](WORKFLOWS.md)
+the workflows it serves and their gaps. Exact formats and contracts live in
+the code, linked below. Backward compatibility of commands, keymaps and
+options is not a goal; the notes file format stays.
 
 ## Principles
 
-- **Reading never writes to the remote.** Only `publish` does, and it shows
+- **Reading never writes to the remote.** Only publish does, and it shows
   what it will send first.
-- **Everything is a thread.** A thread has an anchor, a status and a list of
-  comments. Comments on the whole change are threads with the anchor
-  `change`; there is no other kind of thing.
+- **Everything is a thread.** An anchor, a status, a list of comments.
+  Comments on the whole change are threads anchored at `change`; there is
+  no other kind of thing.
 - **The review lives in a sidebar.** One window on the right lists the
-  review and shows one thread at a time. The plugin never takes a code
-  window's place; code buffers only get signs.
-- **Keys belong to a context.** The plugin sets no global keys, but its own
-  buffers (the sidebar, the composer) have their own, short ones. A verb has
-  the same key everywhere it applies.
+  review or shows one thread. The plugin never takes a code window's place;
+  code buffers only get signs.
+- **Keys belong to a context.** No global keys; the plugin's own buffers
+  (sidebar, composer) have short ones. A verb has the same key everywhere
+  it applies.
 - **The notes file is for humans and agents.** Plain markdown, greppable,
-  safe to hand-edit. Machine state lives elsewhere.
-- **Fits the existing workflow.** gitsigns for hunks and the review diff,
-  `/` in the list to find a thread. The sidebar links to them (changed files, diff
-  base) through hooks; it does not replace them.
+  safe to hand-edit. Machine state lives in a sidecar.
+- **Fits the existing workflow.** gitsigns for hunks, the user's picker for
+  the diff, `/` in the list to find a thread. The plugin links to them
+  through hooks; it does not replace them.
+- **Forge-agnostic.** All remote work is configured command lines; GitLab is
+  one backend (`extras/git-lab`).
 
-## Concepts
+## Model
 
-### Thread
+### Thread and comment
 
-| Field    | Meaning                                                              |
-| -------- | -------------------------------------------------------------------- |
-| anchor   | `change` (whole MR), `path` (whole file), `path:N`, `path:N-M`       |
-| status   | `open` or `resolved`                                                 |
-| comments | ordered list; each has author, body, and a source (see below)        |
-| remote   | the remote thread id, once the thread exists there                   |
+A thread has an anchor (`change`, `path`, `path:N`, `path:N-M`), a status
+(`open` or `resolved`), comments, and a remote id once it exists there.
+Each comment has one source:
 
-### Comment source
+- **remote**: on the remote, read only here; pull rewrites it.
+- **local**: mine, not published; editable and deletable.
+- **proposed**: written by a tool (an agent); not published until I approve.
+- **private**: mine, never published; for me and the agent.
 
-Each comment is exactly one of:
-
-- **remote**: exists on the remote, read only here. Rewritten by pull.
-- **local**: written here, not published. Editable and deletable.
-- **proposed**: a local comment written by a tool (pi). It is not published
-  until I approve it.
-- **private**: mine, never published: for me and the agent, not for peers.
-  Written `me (private)`; `me (note)` is its old name, still read.
-
-A thread has at most one local, private or proposed comment at the end (my
-reply). A new thread is a thread whose first comment is local. That is the
-whole model of "unsent": a thread with a trailing local comment, or a status
-change not published yet (`resolved` locally differs from the remote status).
+Unpublished comments (local, proposed, private) come after the remote ones,
+and there is at most one of mine (local or private): my reply. "Unsent" is
+exactly: a thread with a local comment, or a status that differs from the
+remote's.
 
 ### The two loops
 
-The notes carry two conversations: with peers, through the remote, and with
-the agent, never published. A private comment keeps the second out of the
-first. "Private" is about publishing, not about who reads it: the agent
-reads everything in the notes file.
+The notes carry two conversations: with peers through the remote, and with
+the agent, never published. "Private" is about publishing, not reading:
+the agent reads everything.
 
-- A thread whose first comment is private is **private** as a whole:
-  publish sends none of it (replies, resolve), and it never counts as
-  unsent. Replies on it are private too.
+- A thread whose first comment is private is private as a whole: publish
+  sends none of it and it never counts as unsent.
 - **Approve** means "send it" on a thread that publishes, and "agreed" on a
-  private one: the proposed text becomes private. **Before the MR** (a
-  branch with no MR yet), approving an agent's finding (a new thread it
-  started) also makes it private, and the composer starts new threads
-  private. Once there is an MR, approve sends, as before; making it private
-  (`<C-t>` in the composer, `t` in the sidebar) is how I say "agreed, keep
-  it between us".
-- **Whose turn** (the agent's rule, in the pi extension): a thread is the
-  agent's when it is open and the last comment that is not the agent's is
-  a private comment, or my unpublished comment before the MR, or a peer's comment on
-  my own MR. My published reply last waits for the peer. Fixup plays the
-  author, so it refuses on a peer's MR (the MR's `author` against `me`).
+  private one (the proposed text becomes private). Before the MR exists,
+  approving an agent's new thread also makes it private, and new threads
+  start private.
+- **Whose turn** (the agent's rule): an open thread is the agent's when the
+  last comment not its own is a private comment, my unpublished comment
+  before the MR, or a peer's comment on my MR. Its own fresh finding (a
+  thread holding only its proposed comment) is its turn too: approval
+  gates publishing, not the agent. Its reply last waits for me; my
+  published reply last waits for the peer. Fixup plays the author, so it
+  refuses on a peer's MR.
 
 ### Unread
 
-A thread is unread when it has a remote comment by someone else that I have
-not seen, or someone else resolved it and I have not looked since. "Seen" is
-stored in the sidecar per comment id as a hash of the text I saw, set when
-the thread is shown in the sidebar, or marked by key in the list. A comment
-edited on the remote after I saw it is unread again (an old `true` counts as
-seen). Unread is only a highlight and a counter; it
-never blocks anything.
+A remote comment by someone else I have not seen, or a resolve by someone
+else I have not looked at. The sidecar stores, per comment id, a hash of
+the text I saw, so a comment edited on the remote is unread again. Showing
+a thread marks it seen. Unread is a highlight and a counter; it never
+blocks anything.
 
 ## Safe pull
 
-Pull is a three-way merge with strict rules:
+A three-way merge ([`merge.lua`](lua/review_notes/merge.lua)):
 
-1. Remote comments are replaced by the remote's version. New remote threads
+1. Remote comments are replaced by the remote's version; new remote threads
    are added.
-2. Local and proposed comments are never touched by pull.
-3. A thread deleted on the remote that has local content is kept and marked
-   `orphan`; it is published as a new thread if I choose to.
-4. A remote thread resolved by someone else becomes `resolved` plus unread,
-   and is shown as "resolved by @bob" until I look at it.
-5. If the file changed on disk while pulling (pi wrote to it), the merge is
-   redone on the new content. Writes are atomic (temp file and rename).
+2. Local, proposed and private comments, and unpublished status changes,
+   are never touched.
+3. A thread deleted on the remote that holds my text stays, marked
+   `orphan`, and publishes as a new thread.
+4. A resolve by someone else comes in as resolved plus unread.
+5. If the file changed on disk meanwhile (an agent wrote), the merge is
+   redone on the new content. Writes are atomic (temp file, rename).
 
-Pull is explicit (`p` in the list, `:Review pull`) and also automatic: on
-`FocusGained` (the review of the current buffer) and on entering the list,
-when the last pull (or failed attempt) is older than `auto_pull` seconds
-(default 60; false turns it off). Pull is safe, so running it unasked is
-fine; it reports only new or changed threads, warns once when it starts
-failing, and waits while the notes file has unsaved edits in a buffer.
+Because pull is safe, it also runs unasked: on focus and on entering the
+list, when the last attempt is older than `auto_pull` seconds, and never
+while the notes have unsaved edits in a buffer. It reports only what
+changed.
 
-Failures are told apart by the backend's exit status: unreachable (3, or a
-command stopped after `timeout` seconds), no access (4), no MR (5), not a
-remote of that kind (6). Offline keeps retrying, quietly. No MR is not a
-failure but a branch before its MR: automatic pulls go on, quietly, and
-bring the threads in once it exists. No access and no remote pause
-automatic pulls until a manual one, since retrying cannot fix them. The list and the statusline say
-which, and when the last pull worked.
+Failures are told apart by exit status (contract in
+[`config.lua`](lua/review_notes/config.lua)): offline and "no MR yet" keep
+retrying quietly (a branch before its MR is not a failure); no access and
+"not this kind of remote" pause automatic pulls until a manual one, since
+retrying cannot fix them.
 
-A review is tied to its MR: `threads` may report it (`{mr, threads}`), the
-sidecar records it, and every command gets its IID as `{mr}`. So a merged or
-closed MR keeps syncing (automatic pulls stop, publish names the state in its
-confirm), and a new MR on the same branch never silently takes over: a manual
-pull asks before moving the review, saying which threads leave the notes and
-which of mine publish as new threads there.
+A review is tied to its MR: the sidecar records the IID and every command
+gets it as `{mr}`. A merged or closed MR keeps syncing (automatic pulls
+stop), and a new MR on the same branch never silently takes over: a manual
+pull asks before moving the review.
 
 ## Safe publish
 
-Publish is always explicit.
+Always explicit ([`sync.lua`](lua/review_notes/sync.lua)):
 
-1. Pull first (rules above). If this brought in unread comments on a thread
-   that has a local reply, that thread is listed in the summary as "changed
-   since you wrote this", and is not sent unless confirmed. Everything else
-   is not blocked by unread state.
-2. The summary lists: new threads, replies, resolves and reopens, and
-   proposed comments that are not approved (skipped). While a thread has a
-   proposed comment, its status change is held too, so approving is one
-   step. Private comments and private threads are never in it. It warns when my
-   checkout differs from the MR's head (`sha`): behind (line comments may be
-   refused) or commits not pushed (replies may point at code peers cannot
-   see). The plugin never pushes or updates; it only says so.
-3. After confirm: create everything as remote drafts (when the backend has
-   drafts), then submit exactly the ids created, which sends one
-   notification. What submit did not publish is discarded, so retrying
-   cannot post twice; if the discard fails too, the report names the drafts
-   left pending on the remote.
-4. Resolves and reopens go after the submit (publishing a reply reopens a
-   thread on GitLab).
-5. Pull again. Published local comments become remote comments.
-6. HEAD is recorded as the `publish` checkpoint (below).
+1. Pull first. A local reply on a thread that just got unread comments is
+   flagged "changed since you wrote this" and needs confirming.
+2. Show the plan: new threads, replies, resolves and reopens. Proposed
+   comments are skipped, and so is the status change of a thread that has
+   one, so approving is one step. Private threads and comments never
+   appear. Warn when the checkout differs from the MR's head, a peer
+   approved meanwhile, or the MR is merged or closed. The plugin never
+   pushes.
+3. After confirm, create everything as drafts and submit exactly the ids
+   created (one notification). What submit did not publish is discarded,
+   so a retry cannot post twice.
+4. Resolves and reopens go after the submit (a reply reopens on GitLab).
+5. Pull again; record HEAD as the `publish` checkpoint.
 
 ## Checkpoints
 
-A review event leaves a commit to diff against: my last publish (`publish`),
-the start of the agent's last fixup (`fixup`, written by the pi extension).
-Each is a ref, `refs/review-notes/<branch>/<name>`, local and never pushed,
-so the commit survives gc after a rebase or force-push. `f` in the list
-offers them as diff bases after the MR target, and passes the one picked as
-`review.base` to the `files` hook.
-
-When HEAD no longer contains a checkpoint (the branch was rebased), the
-checkpoint is replayed onto the branch's current merge base with the target
-(`git merge-tree --write-tree`, then `commit-tree`), so the diff shows what
-the author changed and not what came from upstream. If that conflicts, the
-raw checkpoint is offered and labelled as including upstream changes.
+A review event leaves a diff base: my last publish (`publish`), the start of
+the agent's last fixup (`fixup`). Each is a local ref,
+`refs/review-notes/<branch>/<name>`, so the commit survives gc after a
+rebase. When HEAD no longer contains it, it is replayed onto the branch's
+current merge base, so the diff shows the author's changes, not upstream's;
+on conflict the raw one is offered, labelled as such
+([`checkpoint.lua`](lua/review_notes/checkpoint.lua)).
 
 ## The sidebar
 
-`:Review` (or the user's `<leader>rr`) opens the sidebar: a split on the
-right of the tabpage, about 72 columns (`winfixwidth`), owned by the
-plugin. It has two modes, each a buffer of its own shown in the same
-window:
+One window on the right of the tabpage, owned by the plugin
+([`sidebar.lua`](lua/review_notes/sidebar.lua)), with two buffers:
+**list** (the whole review, by urgency) and **thread** (one thread). The
+code window is the last normal window entered; showing a thread shows its
+anchor there. The window has `winfixbuf`, so nothing opens a file in it.
 
-- **list**: the whole review (`reviewnotes://review/<notes path>`,
-  filetype `reviewlist`).
-- **thread**: one thread (`reviewnotes://thread`, filetype `reviewthread`,
-  highlighted as markdown).
-
-The hint bar is the sidebar window's `statusline`, at the bottom like
-lazygit's. With a global status line (`laststatus=3`) Neovim draws the
-focused window's own `statusline`, so the bottom bar turns into the hint
-bar while the cursor is in the sidebar and back when it leaves. Statusline
-plugins (lualine) must exclude `reviewlist` and `reviewthread`, or they
-overwrite it; excluding them from their winbar too keeps the sidebar
-without a top bar.
-
-The window has `winfixbuf` set (the plugin lifts it to switch modes), so
-`:edit` and pickers that honor it never open a file in the sidebar. Window
-options are set on the sidebar window only and never leak into code
-windows.
-
-`:Review` steps one level at a time, like `<Esc>` in lazygit: from a code
-window it opens the sidebar in list mode and moves the cursor there; from
-thread mode it goes back to the list; from the list it closes the sidebar.
-`q` closes it from either mode; as the last window of the tab it leaves an
-empty buffer. Both buffers redraw when the notes file or the sidecar change
-(file watcher), so pi and pulls show up live.
-
-### Finding the keys
-
-Taken from lazygit: the keys show where they are used, and only the ones
-that apply.
-
-- **Hint bar.** Each mode's status line lists its common keys, filtered by the
-  thread at hand (the one under the cursor in the list, the one shown in
-  thread mode): `a approve` only with a proposed comment, `d discard` only
-  with unpublished text, `R read` only when unread, `x` labelled
-  `resolve`, `reopen` or `accept`. Off a thread, the list shows only its
-  review-wide keys. Keys that do not fit the width are dropped from the
-  end; `? keys` always stays.
-- **`?` menu** (also `g?`). A float over the sidebar listing every key of
-  the mode by group (Thread, Review, Move). It stays until `q`, `<Esc>` or
-  `?`. Pressing a key, or `<CR>` on its row, closes it and runs the key on
-  the thread under the cursor; `/` filters. It is built from the same key
-  declarations as the mappings and the hint bar (`keys.lua`), so the three
+- `:Review` steps one level, like `<Esc>` in lazygit: code to list, thread
+  to list, list to closed. `q` steps back too.
+- Both buffers redraw on any change to the notes or sidecar (file watcher),
+  so pulls and agents show up live.
+- **Finding the keys**, from lazygit: the sidebar's `statusline` is a hint
+  bar with only the keys that apply to the thread at hand, and `?` opens
+  every key, runnable. Both are built from the declarations in
+  [`keys.lua`](lua/review_notes/keys.lua), with the mappings, so the three
   never disagree.
-
-### The code window
-
-The code window is the window the sidebar was last entered from, else any
-normal window on a file in the tabpage. Showing a thread shows its anchor
-there: the file, the cursor on the first line, the range highlighted until
-the cursor leaves it. When the sidebar is the only window, a split opens on
-its left for the code. Threads with no code (the change, a directory) leave
-the code window alone.
-
-### List mode
-
-```
-Review  cs/9.5/usl-composed-drop-target
-!1234 -> main  Composed drop target
-2 unread  1 proposed  3 not published  9 open  4 resolved
-pulled 5 min ago
-
-Unread (2)
-  Editor.py:267-293  @bob: why not reuse the helper?
-  change             @alice: please add a changelog entry
-Proposed (1)
-  UIUtils.py:213     me (proposed): Renamed, see fixup! ...
-Not published (3)
-  Editor.py:1217     me: this leaks the stage
-  ...
-Open (9)
-Resolved (4)  ...
-```
-
-- Sections in urgency order, each a fold; Resolved starts folded. A thread
-  is one line: anchor (path relative to the repo, `change` for the whole
-  change), tags, the author and first line of the last comment. Anchors
-  longer than 28 columns are cut from the left (`...tor/Editor.py:267`) and
-  the summary at the window's edge; thread mode shows everything.
-- The cursor starts on the first thread, so `<CR>` works at once.
-- `<CR>` shows the thread under the cursor in thread mode; the code window
-  follows and the cursor stays in the sidebar. `o` does the same and moves
-  the cursor to the code window.
-- Thread keys (below) also work on the thread under the cursor, and on a
-  visual selection of threads (`x` on five lines resolves five threads).
-- Review-wide keys:
-
-| key     | action                                                        |
-| ------- | ------------------------------------------------------------- |
-| `p`     | pull (never sends)                                            |
-| `P`     | publish: the summary, confirm, send                           |
-| `n`     | new thread on the whole change                                |
-| `A`     | approve every proposed comment                                |
-| `D`     | discard every proposed comment                                |
-| `R`     | mark read (the thread or selection under the cursor)          |
-| `t`     | make private / public (the thread or selection under the cursor) |
-| `m`     | MR actions (hooks, see below): approve the MR, open in the browser |
-| `f`     | changed files (hook: the user's diff picker)                  |
-| `e`     | edit the notes file (in the code window)                      |
-| `<Tab>` | fold or unfold a section                                      |
-| `?`     | every key, to read or run (`g?` too)                          |
-
-### Thread mode
-
-```
-# Editor.py:267-293
-open, 2 comments, unread
-
-### @bob  2 days ago
-why not reuse the helper?
-
-### me (not published)
-it needs the stage, the helper takes a layer
-```
-
-The hint bar shows the keys that apply, and the place in the list on the
-right: `r reply  x resolve  a approve  ]t next  q list  ? keys    2 unread  3 of 19`.
-
-- Showing a thread marks it seen; `R` in the list stays for clearing many
-  at once.
-- `q` goes back to list mode, the cursor on that thread's row. The list is
-  home: `q` there closes the sidebar.
-- `]t`/`[t` and `]u`/`[u` move through the threads in list order (the order
-  is kept while moving, so a thread that changes section is not skipped or
-  repeated), and the list's cursor follows. In list mode `j`/`k` do that.
-
-### Thread keys
-
-The same in both modes; in list mode they act on the thread under the
-cursor. Moving (`]t`, `]u`) is thread mode's; `q` steps back one level
-(thread to list, list to closed).
-
-| key  | action                                                       |
-| ---- | ------------------------------------------------------------ |
-| `r`  | reply, or edit my unpublished reply (the composer)           |
-| `x`  | resolve / reopen; acknowledges "resolved by @bob" when unseen |
-| `a`  | approve the proposed comment                                 |
-| `d`  | discard my unpublished text (a new thread disappears)        |
-| `t`  | make private (never published) / public                      |
-| `o`  | go to the code                                               |
-| `q`  | back one level: thread to list, list closes the sidebar      |
-| `?`  | every key, to read or run                                    |
-
-`x`, `a`, `d`, `t` act at once (they are local until publish); `d` asks
-when it would delete a whole new thread. `t` is the composer's `<C-t>`
-after the fact: on a new thread it switches the first comment, so the
-thread becomes private or public; on a published one, my reply not
-sent yet. It does nothing in a document's review, which never publishes.
-
-### MR hooks
-
-The MR is part of the review (approving it, its target, the diff base), so
-the list is its natural place. The plugin stays forge-agnostic: the header
-line and `m` come from optional config.
-
-Whether the review is still worth doing is part of it too: who reviews the
-MR and who approved it. That changes while I review, so it rides on every
-pull (`threads`' `mr`), not only on opening the list. A peer's approval is
-said once per approver (on the first pull of an already approved MR too),
-shows in the header, and is named in publish's confirm. Picking a review up
-is `m r`: assign me, refused when someone else reviews it already, checked
-against GitLab at that moment, not against what the header last showed.
-
-```lua
-mr = {
-  info = { "git-lab", "mr", "info", "--json" }, -- {ref, title, target, url}
-  actions = {
-    { key = "r", desc = "review it", cmd = { "git-lab", "mr", "review-assign", "--if-free", "{ref}" } },
-    { key = "a", desc = "approve", cmd = { "git-lab", "mr", "approve", "-m", "{input}" } },
-    { key = "o", desc = "browser", fn = function(mr) vim.ui.open(mr.url) end },
-  },
-}, -- the default; false for none
-files = function(review) Snacks.picker.git_diff({ base = review.base }) end, -- target or a checkpoint
-```
-
-`{input}` asks for a line of text first; empty leaves it out, with the
-option before it (`-m`). Checkout of another MR stays outside: it changes
-which review is current, so it belongs to a global key (`<leader>rm` in the
-user config), not to the sidebar of the current one.
+- Thread keys work in both modes (in the list, on the thread under the
+  cursor or a visual selection). Review-wide keys (pull, publish, approve
+  all, MR actions, changed files) live in the list.
+- **MR hooks.** The MR header and `m` actions come from `mr` in the config;
+  `f` calls the user's `files` function with the picked diff base. MR info
+  rides on every pull, so a peer's approval shows up while I review.
+  Checking out another MR changes which review is current, so it belongs to
+  a global key, not the sidebar.
+- **No picker.** `/` in the list finds a thread; a separate finder
+  duplicated the list without its keys. `items()` stays as the API for
+  anyone who wants one.
 
 ## Code buffers
 
-Signs only: the anchor range gets a bar in the sign column, its last line
-the state icon (unread, proposed, unsent, open, resolved). Optional
-(`signs = false`). Change threads have no mark in code buffers; they are
-rows in the list like any other. Anchors follow edits through extmarks and
-are written back on save. A thread whose line was deleted stays on the
-nearest line and is marked `moved`.
-
-Global keys the README suggests (the plugin sets none):
-
-| key          | action                                                   |
-| ------------ | -------------------------------------------------------- |
-| `<leader>rr` | the sidebar: open, back to the list, close               |
-| `<leader>rt` | the thread at the cursor in the sidebar (a menu if several) |
-| `<leader>rn` | new thread on the line, or the visual range              |
-| `<leader>rN` | new thread on the whole change                           |
-| `]r` / `[r`  | next / previous unread across the review (in the sidebar); with nothing unread, the next thread in the buffer |
-
-`<leader>rn` always starts a new thread, even on a line that has one;
-replies are `r` in the sidebar.
-
-## Commands
-
-| Command           | Effect                                               |
-| ----------------- | ---------------------------------------------------- |
-| `:Review`         | the sidebar: open, back to the list, close           |
-| `:Review thread`  | the thread at the cursor in the sidebar              |
-| `:Review pull`    | pull, for scripts and autocmds                       |
-| `:Review publish` | publish (summary, confirm)                           |
-| `:Review edit`    | the notes file                                       |
-
-Everything else is a key in the sidebar, or a Lua function
-(`require("review_notes").actions`).
-
-## Finding a thread
-
-No picker: the list is home, and `/` in it finds a thread by anchor, tag,
-author or the last comment's first line. A finder that searched the whole
-conversation duplicated the list without its keys. `items(buf)` stays the
-API for anyone who wants one.
-
-## Writing
-
-The composer is a float at the bottom of the sidebar, at its width (or
-under the cursor, for `<leader>rn` in code). `<C-s>` or `:w` saves, `q`
-closes and keeps the text for next time. New thread on a line or range from
-the code; new change thread from the list (`n`) or `<leader>rN`; reply from
-the sidebar (`r`).
+Signs only ([`signs.lua`](lua/review_notes/signs.lua)): a bar down the
+anchor range, the state icon on its last line. Anchors are extmarks, follow
+edits, and are written back on save; a thread whose lines were deleted stays
+on the nearest line, marked `moved`.
 
 ## Storage
 
-Two files per review, in `review/` under the common git dir (or beside a
-file outside git). The common dir is shared by every worktree: the review
-belongs to the branch, and `git worktree remove` deletes a worktree's own
-git dir. Notes found in a worktree's own dir (where they lived before) are
-moved over the first time the review is opened, unless the common dir has
-that branch's notes already.
+Per review, in `review/` under the git common dir (shared by worktrees, so
+removing a worktree keeps the review):
 
-- `<branch>.md`: the notes. Humans and agents read and write it.
-- `<branch>.json`: sidecar for the plugin: remote status, last-seen
-  markers, line anchors. Safe to delete (seen markers reset and everything
-  shows as unread).
+- `<branch>.md`: the notes. Grammar at the top of
+  [`store.lua`](lua/review_notes/store.lua). Agents add a thread or a reply
+  by appending a `### me (proposed)` section and need nothing else.
+- `<branch>.json`: the sidecar: remote status, seen hashes, the MR. Safe to
+  delete (everything shows as unread).
 
-A file outside git has its own review in a sibling `<file>.review.md`,
-local only.
-
-### Notes file format
-
-```markdown
-# Review of feature/timeouts
-
-## change {id=ghi789}
-status: open
-
-### @alice
-please add a changelog entry
-
-### @bob
-+1
-
-### me (local)
-done, see the next push
-
-## src/http.cpp:88 {local}
-status: open
-
-### me (local)
-timeout must cover connect, not only read
-
-## src/http.cpp:120-124 {id=abc123}
-status: resolved
-
-### @alice
-why 30s?
-
-### me (proposed)
-Matches the studio default, I added a comment above the constant.
-```
-
-Rules:
-
-- `## <anchor> {attrs}` starts a thread. Anchor is `change`, `path`,
-  `path:N` or `path:N-M`. Attrs: `id=` (remote), `local` (no remote yet).
-- `status: open|resolved` is the first line of the thread; the remote status
-  is in the sidecar, so a difference between the two means "resolve or reopen
-  is not published yet".
-- `### @author` is a remote comment, `### me (local)`, `### me (private)` and
-  `### me (proposed)` are mine. A thread whose first comment is private is
-  private as a whole. Body is everything up to the next heading.
-  Body lines starting with `#` are escaped on write.
-- Agents add a thread or a reply by appending a section with
-  `### me (proposed)`, and need no other knowledge of the format. The
-  plugin picks up the change through its file watcher.
-
-## Backend contract
-
-All remote work goes through command lines in `backend` (see
-`review_notes.Config` in `config.lua` for the exact contract), run in the
-repo root with text on stdin:
-
-- `threads` prints every thread as JSON, with a stable `id` per comment so
-  unread is tracked per comment. `path = null` is a thread on the whole
-  change.
-- `add`, `general` and `reply` start a thread on a line, start one on the
-  whole change, or reply; with drafts they queue and print the draft id.
-- `submit` (optional) publishes exactly the queued `{ids}`; `discard`
-  (optional) drops what submit did not publish. A backend without drafts
-  leaves both out and posts in order.
-- `resolve`, `unresolve` change a thread's state.
-
-The git-lab script in `extras/` implements it for GitLab.
+A file outside git gets a sibling `<file>.review.md`, local only.
 
 ## Code layout
 
-| Module            | Responsibility                                             |
-| ----------------- | ---------------------------------------------------------- |
-| `store.lua`       | parse and write the markdown file and the sidecar, atomic  |
-| `merge.lua`       | pull merge and publish plan, pure functions, fully tested  |
-| `backend.lua`     | run the commands, the JSON contract                        |
-| `config.lua`      | the options                                                |
-| `review.lua`      | the current review: context, items, sorting, watcher, change listeners |
-| `sync.lua`        | pull and publish                                           |
-| `actions.lua`     | the verbs, on items: resolve, approve, discard, reply, ... |
-| `checkpoint.lua`  | review checkpoints (refs), diff bases, ahead / behind      |
-| `sidebar.lua`     | the sidebar window and the code window                     |
-| `keys.lua`        | key declarations: mappings, hint bar, `?` menu             |
-| `list.lua`        | list mode: drawing, folds, review-wide keys, MR hooks      |
-| `thread.lua`      | thread mode: drawing, hint bar, thread keys, list order    |
-| `signs.lua`       | anchors (extmarks) and signs in code buffers               |
-| `compose.lua`     | the composer float                                         |
-| `init.lua`        | setup, commands, public API (thin)                         |
+| Module           | Responsibility                                               |
+| ---------------- | ------------------------------------------------------------ |
+| `store.lua`      | parse and write the notes and sidecar, atomic; no Neovim     |
+| `merge.lua`      | pull merge and publish plan, pure functions                  |
+| `backend.lua`    | run the configured commands; the only code that spawns them  |
+| `config.lua`     | the options and the backend contract                         |
+| `review.lua`     | the current review: context, items, sorting, watcher, listeners |
+| `sync.lua`       | pull and publish                                             |
+| `actions.lua`    | the verbs (resolve, approve, discard, reply, ...)           |
+| `checkpoint.lua` | checkpoint refs, diff bases, ahead / behind                  |
+| `sidebar.lua`    | the sidebar window and the code window                       |
+| `keys.lua`       | key declarations: mappings, hint bar, `?` menu               |
+| `list.lua`       | list mode, review-wide keys, MR hooks                        |
+| `thread.lua`     | thread mode, list order for `]t` / `]u`                      |
+| `signs.lua`      | anchors and signs in code buffers                            |
+| `health.lua`     | `:checkhealth review_notes`                                  |
+| `compose.lua`    | the composer float                                           |
+| `init.lua`       | setup, commands, public API (thin)                           |
 
-`actions` is the one place a verb lives; the sidebar binds keys to it. Every change goes through `review.edit`, which tells the
-listeners (code signs, the sidebar), so nothing refreshes by hand.
+- A verb lives only in `actions`; UIs bind keys to it.
+- Every change goes through `review.edit`, which notifies the listeners
+  (signs, sidebar); nothing refreshes by hand.
+- `store` and `merge` have no Neovim dependencies, so most logic is tested
+  as plain Lua; a fake backend script covers the rest.
 
-`merge.lua` and `store.lua` have no Neovim dependencies, so most of the
-logic is testable in plain Lua, and a fake backend script covers the rest.
+## Agent integration
 
-## Pi extension
-
-- `/review` writes `### me (proposed)` comments on new threads; it never
-  touches remote comments. On a peer's MR it first re-checks my open
-  threads the author answered (a proposed resolve, or a reply saying what
-  is missing).
-- `/fixup` takes the threads that are its turn (see "The two loops"), makes
-  `fixup!` commits, and adds a proposed reply, resolving the thread when it
-  is done. The resolve is held with the proposed reply until I approve it.
-  It refuses on a peer's MR, and records the `fixup` checkpoint first.
-- Because proposed comments never publish without approval, running it in
-  the middle of a pull from a peer is harmless.
+[`extras/pi/review-notes.ts`](extras/pi/review-notes.ts) reads the same
+notes file. `/review` adds proposed threads (and on a peer's MR first
+re-checks my threads the author answered); `/fixup` handles the threads
+that are its turn with `fixup!` commits and proposed replies, holding the
+resolve with the reply, and records the `fixup` checkpoint. Everything it
+writes is proposed, so running it at any time, even during a pull, is safe.
