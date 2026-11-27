@@ -576,7 +576,7 @@ ${findingTags("Report every FIX, CHECK and QUESTION; of CONSIDER and NIT the 5 m
         return reportNothingForPi(threads, mr, `in the review notes${scope ? ` (scope "${scope}")` : ""}`, ctx);
       if (!requireCleanTree(ctx.cwd, ctx)) return;
       const branch = getBranch(ctx.cwd);
-      // The plugin's `f` diff base "since the agent's last fixup"; a ref keeps
+      // The plugin's diff base "since the agent's last fixup" (`bases()`); a ref keeps
       // the commit alive across a rebase.
       git(ctx.cwd, "update-ref", `refs/review-notes/${branch}/fixup`, "HEAD");
 

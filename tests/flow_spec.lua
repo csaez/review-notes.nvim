@@ -370,7 +370,7 @@ describe("pull and publish", function()
     local sent = table.concat(calls(), "\n")
     assert.truthy(sent:find("stdin: x", 1, true))
     assert.is_nil(sent:find("for pi", 1, true))
-    local bases = require("review_notes.checkpoint").bases(require("review_notes.review").context(), "HEAD~1")
+    local bases = review.bases("HEAD~1")
     assert.are.same({ "target", "publish" }, vim.tbl_map(function(b) return b.name end, bases))
   end)
 

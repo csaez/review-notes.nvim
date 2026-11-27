@@ -314,22 +314,9 @@ local function load_mr(buf)
   end)
 end
 
-local function info(buf, base)
+local function info(buf)
   local h = lists[buf]
-  return { ctx = h.ctx, mr = h.mr, base = base or (h.mr and h.mr.target) }
-end
-
---- `f`: the changed files against a base. With checkpoints (my last
---- publish, the agent's last fixup) a menu picks the base first.
-local function files(buf)
-  local h = lists[buf]
-  if not config.values.files then return notify("no `files` function configured") end
-  local bases = checkpoint.bases(h.ctx, h.mr and h.mr.target)
-  if #bases <= 1 then return config.values.files(info(buf, bases[1] and bases[1].rev)) end
-  vim.ui.select(bases, {
-    prompt = "Changed files",
-    format_item = function(b) return b.label end,
-  }, function(b) if b then config.values.files(info(buf, b.rev)) end end)
+  return { ctx = h.ctx, mr = h.mr }
 end
 
 local function run_mr_action(buf, a)
@@ -423,8 +410,6 @@ local function keys_of(buf)
     end },
     { lhs = "D", group = "Review", desc = "discard every proposed comment", fn = function() actions.discard_proposed(h.ctx) end },
     { lhs = "m", group = "Review", desc = "merge request actions", hint = "MR", fn = function() mr_menu(buf) end },
-    { lhs = "f", group = "Review", desc = "changed files: the whole change, since my publish, since the fixup",
-      fn = function() files(buf) end },
     { lhs = "e", group = "Review", desc = "edit the notes file (in the code window)", fn = function() sidebar.edit(h.ctx.path) end },
 
     { lhs = "<Tab>", group = "Move", desc = "fold or unfold a section", fn = function()

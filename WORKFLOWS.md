@@ -43,7 +43,8 @@ Every workflow combines two loops around one notes file per branch.
    approved by a peer sorts last, dimmed.
 2. **Size it up.** Check it out (outside: `git-lab mr checkout`, fork MRs
    as `mr/IID`), in my checkout or a worktree. gitsigns against the
-   target, `f` for the changed files.
+   target and a changed-files picker (outside: my own config; `bases()`
+   adds the checkpoints if wanted).
 3. **Take it.** `m r` assigns me unless someone else reviews it; `m R`
    joins anyway.
 4. **Agent reviews.** `/review PROJ-123` (free text: ticket, scope, focus).
@@ -64,7 +65,7 @@ Every workflow combines two loops around one notes file per branch.
 9. **Check the fixes.** `/review` again: it first checks each of my open
    threads the author answered (a proposed resolve, or a reply saying what
    is missing), then looks for new findings. I read the replies (`]u`) and
-   `f` "since my last publish" (replayed past a rebase).
+   the diff "since my last publish" (`bases()`, replayed past a rebase).
 10. **Decide.** Good: `m a`. Not: back to 5, or 4 on the new commits.
 11. **Done.** Approved or merged: automatic pulls stop. The notes stay.
 
@@ -85,7 +86,7 @@ Every workflow combines two loops around one notes file per branch.
    one `fixup!` commit per note's commit, a proposed reply per thread,
    resolved when fixed, verified or declined; open when it needs my
    decision, with a proposed question when unclear.
-6. **Check.** `f` "since the agent's last fixup", read its replies; reopen,
+6. **Check.** The diff "since the agent's last fixup", read its replies; reopen,
    add private comments; back to 5.
 
 ## C. My MR under review (remote, with a local loop inside)
@@ -97,7 +98,7 @@ Every workflow combines two loops around one notes file per branch.
    keeps the agent off the thread. Leave the clear ones to the agent, add
    a private comment (`<C-t>` in the composer, `t` in the sidebar) to steer it, or fix them by hand.
 4. **Agent fixes.** `/fixup`: fixups and proposed replies, as in B5.
-5. **Review the agent's work.** `f` "since the agent's last fixup", its
+5. **Review the agent's work.** The diff "since the agent's last fixup", its
    replies; approve (`a`, `A`), edit or discard.
 6. **Push, publish.** Push the fixups (outside; publish warns about
    unpushed commits), then `P` sends replies and resolves.

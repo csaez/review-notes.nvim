@@ -129,7 +129,8 @@ the agent's last fixup (`fixup`). Each is a local ref,
 rebase. When HEAD no longer contains it, it is replayed onto the branch's
 current merge base, so the diff shows the author's changes, not upstream's;
 on conflict the raw one is offered, labelled as such
-([`checkpoint.lua`](lua/review_notes/checkpoint.lua)).
+([`checkpoint.lua`](lua/review_notes/checkpoint.lua)). The plugin shows no
+diff itself: `bases()` hands them to whatever diff or picker the user has.
 
 ## The sidebar
 
@@ -150,9 +151,9 @@ anchor there. The window has `winfixbuf`, so nothing opens a file in it.
   never disagree.
 - Thread keys work in both modes (in the list, on the thread under the
   cursor or a visual selection). Review-wide keys (pull, publish, approve
-  all, MR actions, changed files) live in the list.
-- **MR hooks.** The MR header and `m` actions come from `mr` in the config;
-  `f` calls the user's `files` function with the picked diff base. MR info
+  all, MR actions) live in the list.
+- **MR hooks.** The MR header and `m` actions come from `mr` in the config.
+  MR info
   rides on every pull, so a peer's approval shows up while I review.
   Checking out another MR changes which review is current, so it belongs to
   a global key, not the sidebar.

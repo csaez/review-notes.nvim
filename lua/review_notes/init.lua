@@ -21,6 +21,7 @@ local sync = require("review_notes.sync")
 local thread = require("review_notes.thread")
 local sidebar = require("review_notes.sidebar")
 local list_mode = require("review_notes.list")
+local checkpoint = require("review_notes.checkpoint")
 
 local M = {}
 
@@ -237,6 +238,20 @@ M.goto_item = thread.go_to
 ---@param action "resolve"|"read"|"approve"|"discard"|"toggle_private"
 function M.item_action(item, action)
   actions[action](item.ctx, item.key)
+end
+
+--- The diff bases of the review of *buf*, to wire to your own diff or
+--- picker: *target* first when given (the whole change), then each recorded
+--- checkpoint (`publish`: my last publish; `fixup`: the start of the agent's
+--- last fixup), replayed onto the current base after a rebase. Empty outside
+--- a git review.
+---@param target string? the MR target (`origin/main`)
+---@param buf integer?
+---@return review_notes.Base[]
+function M.bases(target, buf)
+  local ctx = review.context(buf)
+  if not ctx or ctx.kind ~= "git" then return {} end
+  return checkpoint.bases(ctx, target)
 end
 
 --- A statusline component: what waits for me in the current review, and

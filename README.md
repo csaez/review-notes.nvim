@@ -94,7 +94,7 @@ and `?` lists every key (press one to run it). The main ones:
 | `p` `P`    | list    | pull / publish                                         |
 | `n`        | list    | new thread on the whole change                         |
 | `A` `D`    | list    | approve / discard every proposed comment               |
-| `m` `f`    | list    | MR actions / changed files (see Configuration)         |
+| `m`        | list    | MR actions (see Configuration)                         |
 | `e`        | list    | edit the notes file                                    |
 | `]t` `]u`  | thread  | next thread / next unread (`[` for previous)           |
 | `q`        | both    | back one level                                         |
@@ -131,8 +131,9 @@ you have not published.
   threads that changed meanwhile, a peer's approval, a checkout that differs
   from the MR's head) and asks. Retrying after a failure cannot post twice.
 - **Proposed** comments are sent only once approved; **private** ones never.
-- **Checkpoints.** `f` offers "since my last publish" and "since the agent's
-  last fixup" as diff bases, replayed past a rebase.
+- **Checkpoints.** My last publish and the agent's last fixup are recorded
+  as diff bases ("what changed since"), replayed past a rebase; `bases()`
+  in the API hands them to your own diff.
 
 Details: [DESIGN.md](DESIGN.md).
 
@@ -170,8 +171,6 @@ require("review_notes").setup({
   timeout = 30,    -- seconds before a backend command counts as offline
   backend = { ... }, -- command lines; defaults call git-lab
   mr = { ... },      -- MR header and `m` actions; false: none
-  -- `f` in the list; review.base is the MR target or a checkpoint
-  files = function(review) Snacks.picker.git_diff({ base = review.base }) end,
 })
 ```
 
@@ -180,8 +179,9 @@ Defaults and the backend contract (operations, JSON, exit statuses) are in
 another forge from it.
 
 **API.** `require("review_notes")` also offers `items(buf)` (every thread,
-for your own picker), `open_item`, `goto_item`, `item_action`, and
-`status()`, a cheap statusline component. Icons and highlight groups
+for your own picker), `open_item`, `goto_item`, `item_action`,
+`bases(target)` (the MR target and the checkpoints, as revs to diff
+against), and `status()`, a cheap statusline component. Icons and highlight groups
 (`ReviewUnread`, `ReviewKey`, ...) are in `.style`, defined with
 `default = true` so colorschemes can override them. See
 [`init.lua`](lua/review_notes/init.lua).
